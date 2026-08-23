@@ -1,5 +1,5 @@
 """
-QueryMind FastAPI Application Entry Point
+DataDuck FastAPI Application Entry Point — Ask. Dig. Discover.
 """
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, HTTPException
@@ -82,6 +82,50 @@ async def health_check():
         "version": settings.APP_VERSION,
         "environment": settings.ENVIRONMENT,
     }
+
+
+@app.get("/api/health/ollama")
+async def ollama_health_check():
+    """Health check for Ollama local service."""
+    import httpx
+    base_url = (settings.OLLAMA_BASE_URL or "http://localhost:11434").rstrip("/")
+    model = settings.OLLAMA_MODEL or "qwen2.5-coder:7b"
+
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            response = await client.get(f"{base_url}/api/tags")
+            if response.status_code == 200:
+                data = response.json()
+                installed_models = [m.get("name") for m in data.get("models", [])]
+                model_installed = any(
+                    m == model or m == f"{model}:latest" or m.startswith(model)
+                    for m in installed_models
+                )
+                return {
+                    "status": "healthy",
+                    "provider": "ollama",
+                    "base_url": base_url,
+                    "model": model,
+                    "model_installed": model_installed,
+                    "available_models": installed_models,
+                }
+            else:
+                return {
+                    "status": "unhealthy",
+                    "provider": "ollama",
+                    "base_url": base_url,
+                    "model": model,
+                    "error": f"Ollama returned HTTP {response.status_code}",
+                }
+    except Exception:
+        return {
+            "status": "unhealthy",
+            "provider": "ollama",
+            "base_url": base_url,
+            "model": model,
+            "error": "Local AI service is unavailable. Make sure Ollama is running.",
+        }
+
 
 
 @app.get("/")

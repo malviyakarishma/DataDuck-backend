@@ -21,7 +21,7 @@ from app.core.exceptions import AIServiceError
 
 logger = logging.getLogger(__name__)
 
-QUERY_GENERATION_SYSTEM_PROMPT = """You are QueryMind's AI database analyst.
+QUERY_GENERATION_SYSTEM_PROMPT = """You are DataDuck's AI database analyst.
 Your job is to generate safe, read-only database queries based on natural language questions.
 
 CRITICAL SECURITY RULES:
@@ -64,7 +64,7 @@ For MongoDB, the "query" field should be a JSON string of the operation dict:
 
 IMPORTANT: Respond ONLY with the JSON object. No markdown, no explanation outside JSON."""
 
-ANALYSIS_SYSTEM_PROMPT = """You are QueryMind's AI data analyst. You receive query results and provide clear, professional analysis.
+ANALYSIS_SYSTEM_PROMPT = """You are DataDuck's AI data analyst. You receive query results and provide clear, professional analysis.
 
 You MUST respond with valid JSON matching this structure:
 {
@@ -249,10 +249,4 @@ Analyze these results and provide a clear, professional answer:"""
         return text
 
 
-def get_ai_service() -> AIProvider:
-    """Factory function to get the configured AI provider."""
-    provider = (settings.AI_PROVIDER or "").lower()
-    if provider in ("openai", "groq") or settings.GROQ_API_KEY or (settings.OPENAI_API_KEY and not settings.GEMINI_API_KEY):
-        from app.services.openai_service import OpenAIService
-        return OpenAIService()
-    return GeminiService()
+from app.services.ai_provider import get_ai_service

@@ -5,7 +5,7 @@ from typing import Optional
 
 class Settings(BaseSettings):
     # App
-    APP_NAME: str = "QueryMind"
+    APP_NAME: str = "DataDuck"
     APP_VERSION: str = "1.0.0"
     DEBUG: bool = False
     ENVIRONMENT: str = "development"
@@ -14,7 +14,11 @@ class Settings(BaseSettings):
     DATABASE_URL: str = "postgresql+asyncpg://postgres:password@localhost:5432/querymind"
 
     # AI Provider
-    AI_PROVIDER: str = "gemini"  # "gemini", "openai", or "groq"
+    AI_PROVIDER: str = "ollama"  # "ollama", "gemini", "openai", or "groq"
+
+    # Ollama Local AI
+    OLLAMA_BASE_URL: str = "http://localhost:11434"
+    OLLAMA_MODEL: str = "qwen2.5-coder:7b"
 
     # Gemini AI
     GEMINI_API_KEY: str = ""

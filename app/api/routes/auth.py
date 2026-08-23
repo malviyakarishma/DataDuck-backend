@@ -20,12 +20,41 @@ import logging
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
-COOKIE_SETTINGS = {
-    "httponly": True,
-    "samesite": "none",
-    "secure": True,
-    "max_age": settings.REFRESH_TOKEN_EXPIRE_DAYS * 86400,
-}
+IS_DEV = settings.ENVIRONMENT == "development"
+
+
+def set_auth_cookies(response: Response, access_token: str, refresh_token: str):
+    response.set_cookie(
+        key="access_token",
+        value=access_token,
+        httponly=True,
+        samesite="lax" if IS_DEV else "none",
+        secure=not IS_DEV,
+        max_age=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+    )
+    response.set_cookie(
+        key="refresh_token",
+        value=refresh_token,
+        httponly=True,
+        samesite="lax" if IS_DEV else "none",
+        secure=not IS_DEV,
+        max_age=settings.REFRESH_TOKEN_EXPIRE_DAYS * 86400,
+    )
+
+
+def clear_auth_cookies(response: Response):
+    response.delete_cookie(
+        key="access_token",
+        httponly=True,
+        samesite="lax" if IS_DEV else "none",
+        secure=not IS_DEV,
+    )
+    response.delete_cookie(
+        key="refresh_token",
+        httponly=True,
+        samesite="lax" if IS_DEV else "none",
+        secure=not IS_DEV,
+    )
 
 
 @router.post("/register", response_model=OTPResponse, status_code=status.HTTP_201_CREATED)
@@ -54,8 +83,7 @@ async def verify_user_otp(
     """Verify 2MFA OTP code and log user in."""
     try:
         user, access_token, refresh_token = await verify_otp(db, request.email, request.otp_code)
-        response.set_cookie(key="access_token", value=access_token, **COOKIE_SETTINGS)
-        response.set_cookie(key="refresh_token", value=refresh_token, **COOKIE_SETTINGS)
+        set_auth_cookies(response, access_token, refresh_token)
         return TokenResponse(
             access_token=access_token,
             refresh_token=refresh_token,
@@ -97,8 +125,7 @@ async def login(
                 message="Account not verified. A new verification code has been sent to your email.",
             )
 
-        response.set_cookie(key="access_token", value=access_token, **COOKIE_SETTINGS)
-        response.set_cookie(key="refresh_token", value=refresh_token, **COOKIE_SETTINGS)
+        set_auth_cookies(response, access_token, refresh_token)
         return LoginResponse(
             access_token=access_token,
             refresh_token=refresh_token,
@@ -130,7 +157,7 @@ async def refresh(
             raise HTTPException(status_code=401, detail="Refresh token missing.")
 
         new_access = await refresh_access_token(db, token_to_use)
-        response.set_cookie(key="access_token", value=new_access, **COOKIE_SETTINGS)
+        set_auth_cookies(response, new_access, token_to_use)
         payload = decode_token(new_access, "access")
         user = await get_current_user(db, payload["sub"])
 
@@ -148,8 +175,7 @@ async def refresh(
 @router.post("/logout")
 async def logout(response: Response):
     """Logout — clear cookies."""
-    response.delete_cookie("access_token")
-    response.delete_cookie("refresh_token")
+    clear_auth_cookies(response)
     return {"message": "Logged out successfully."}
 
 

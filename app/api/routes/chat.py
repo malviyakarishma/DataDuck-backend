@@ -17,7 +17,7 @@ from app.services.conversation_service import (
 )
 from app.services.database_service import get_database_by_id
 from app.services.query_service import run_query_pipeline
-from app.services.gemini_service import get_ai_service
+from app.services.ai_provider import get_ai_service
 from app.core.exceptions import (
     AuthorizationError, DatabaseNotFoundError, QueryValidationError,
     QueryExecutionError, AIServiceError, WriteOperationError, QueryTimeoutError
