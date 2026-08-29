@@ -14,7 +14,11 @@ from typing import Optional
 import httpx
 
 from app.services.ai_provider import AIProvider, QueryGenerationResult, AnalysisResult
-from app.services.gemini_service import QUERY_GENERATION_SYSTEM_PROMPT, ANALYSIS_SYSTEM_PROMPT
+from app.services.gemini_service import (
+    QUERY_GENERATION_SYSTEM_PROMPT, ANALYSIS_SYSTEM_PROMPT,
+    INTENT_CLASSIFICATION_SYSTEM_PROMPT, SCHEMA_EXPLORATION_SYSTEM_PROMPT,
+    CASUAL_CHAT_SYSTEM_PROMPT
+)
 from app.core.config import settings
 from app.core.exceptions import AIServiceError
 
@@ -146,10 +150,123 @@ Analyze these results and provide a clear, professional answer:"""
             logger.error(f"OpenAI analysis error: {e}")
             raise AIServiceError(f"AI analysis error: {str(e)}")
 
+    async def classify_intent(
+        self,
+        user_question: str,
+        conversation_history: list[dict],
+    ) -> str:
+        """Classify user intent using OpenAI/Groq with fast heuristic check."""
+        from app.services.ai_provider import (
+            quick_classify_intent, INTENT_DATA_QUERY, INTENT_SCHEMA_EXPLORATION,
+            INTENT_CASUAL_CHAT, INTENT_WRITE_REQUEST, ALL_INTENTS
+        )
+        quick = quick_classify_intent(user_question)
+        if quick:
+            return quick
+
+        history_text = self._format_history(conversation_history)
+        prompt = f"""{INTENT_CLASSIFICATION_SYSTEM_PROMPT}
+
+CONVERSATION HISTORY:
+{history_text}
+
+USER MESSAGE: {user_question}
+
+Classify the user intent:"""
+
+        try:
+            parsed = await self._call_openai(INTENT_CLASSIFICATION_SYSTEM_PROMPT, prompt)
+            intent = parsed.get("intent", "").upper().strip()
+            if intent in ALL_INTENTS:
+                return intent
+            return INTENT_DATA_QUERY
+        except Exception as e:
+            logger.warning(f"OpenAI intent classification failed: {e}. Defaulting to DATA_QUERY.")
+            return INTENT_DATA_QUERY
+
+    async def answer_schema_question(
+        self,
+        user_question: str,
+        full_schema: dict,
+        db_type: str,
+        conversation_history: list[dict],
+    ) -> AnalysisResult:
+        """Answer schema exploration questions using OpenAI/Groq."""
+        history_text = self._format_history(conversation_history)
+        schema_text = json.dumps(full_schema, indent=2, default=str)
+
+        prompt = f"""{SCHEMA_EXPLORATION_SYSTEM_PROMPT}
+
+DATABASE TYPE: {db_type}
+
+DATABASE SCHEMA METADATA:
+{schema_text}
+
+CONVERSATION HISTORY:
+{history_text}
+
+USER QUESTION ABOUT SCHEMA: {user_question}
+
+Explain the requested schema details accurately and clearly:"""
+
+        try:
+            parsed_data = await self._call_openai(SCHEMA_EXPLORATION_SYSTEM_PROMPT, prompt)
+            return AnalysisResult(**parsed_data)
+        except Exception as e:
+            logger.error(f"OpenAI schema exploration error: {e}")
+            return AnalysisResult(
+                answer=f"Here is the schema overview for this {db_type} database:\n\n" +
+                       f"- Total tables: {full_schema.get('total_tables', len(full_schema.get('tables', [])))}\n" +
+                       f"- Tables: {', '.join(t.get('name', '') for t in full_schema.get('tables', []))}",
+                insights=["Use the Schema Explorer button to inspect full columns and relationships."],
+            )
+
+    async def handle_casual_chat(
+        self,
+        user_question: str,
+        conversation_history: list[dict],
+    ) -> str:
+        """Generate a natural conversational response using OpenAI/Groq."""
+        history_text = self._format_history(conversation_history)
+        prompt = f"""{CASUAL_CHAT_SYSTEM_PROMPT}
+
+CONVERSATION HISTORY:
+{history_text}
+
+USER MESSAGE: {user_question}
+
+Response:"""
+
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": CASUAL_CHAT_SYSTEM_PROMPT},
+                {"role": "user", "content": prompt},
+            ],
+            "temperature": 0.3,
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await client.post(self.api_url, headers=headers, json=payload)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    content = data["choices"][0]["message"]["content"].strip()
+                    if content:
+                        return content
+        except Exception as e:
+            logger.warning(f"OpenAI casual chat call error: {e}")
+
+        return "Hello! I am DataDuck, your read-only database analyst. Ask me questions about your data, inspect table schemas, or request an ER diagram!"
+
     async def handle_write_intent(self, user_question: str) -> str:
         return (
             "This database connection is read-only. I can analyze the data, "
-            "run queries, generate visualizations, and identify patterns — but I "
+            "run queries, generate visualizations, explain schemas, and create ER diagrams — but I "
             "cannot modify, delete, insert, or alter any data. "
             "If you need to make changes, please connect directly to your database."
         )

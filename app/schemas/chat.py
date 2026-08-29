@@ -11,7 +11,7 @@ class ChatRequest(BaseModel):
 
 class VisualizationSpec(BaseModel):
     required: bool
-    type: Optional[str] = None  # bar, line, pie, donut, scatter, area, table, kpi
+    type: Optional[str] = None  # bar, line, pie, donut, scatter, area, table, kpi, er_diagram
     title: Optional[str] = None
     description: Optional[str] = None
     x_key: Optional[str] = None
@@ -19,6 +19,7 @@ class VisualizationSpec(BaseModel):
     value_key: Optional[str] = None  # for pie/KPI
     label_key: Optional[str] = None  # for pie
     format: Optional[str] = None  # currency, percentage, number
+    mermaid: Optional[str] = None  # Mermaid diagram string for ER diagrams
 
 
 class QueryInfo(BaseModel):
@@ -41,10 +42,12 @@ class MessageResponse(BaseModel):
     answer: str
     insights: list[str] = []
     warnings: list[str] = []
+    intent: Optional[str] = None
     query: Optional[QueryInfo] = None
     result: Optional[QueryResultData] = None
     visualization: Optional[VisualizationSpec] = None
     created_at: datetime
+
 
 
 class ChatResponse(BaseModel):

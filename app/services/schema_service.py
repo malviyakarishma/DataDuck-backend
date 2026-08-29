@@ -38,6 +38,8 @@ def schema_to_dict(schema: SchemaInfo) -> dict:
                         "is_nullable": c.is_nullable,
                         "is_primary_key": c.is_primary_key,
                         "is_foreign_key": c.is_foreign_key,
+                        "default_value": c.default_value,
+                        "max_length": c.max_length,
                         "references_table": c.references_table,
                         "references_column": c.references_column,
                     }
@@ -47,6 +49,101 @@ def schema_to_dict(schema: SchemaInfo) -> dict:
             for t in schema.tables
         ]
     }
+
+
+def _sanitize_mermaid_type(data_type: str) -> str:
+    """Clean data type for Mermaid ER diagram syntax."""
+    if not data_type:
+        return "text"
+    # Remove parameters like (255), (10, 2), array brackets, etc.
+    cleaned = data_type.split("(")[0].strip()
+    cleaned = cleaned.replace("[]", "_array").replace(" ", "_")
+    # Clean non-alphanumeric characters
+    cleaned = "".join(c for c in cleaned if c.isalnum() or c == "_")
+    return cleaned.lower() or "text"
+
+
+def _sanitize_mermaid_identifier(name: str) -> str:
+    """Ensure identifier has valid Mermaid naming."""
+    if not name:
+        return "table"
+    cleaned = "".join(c if c.isalnum() or c == "_" else "_" for c in name.strip())
+    return cleaned
+
+
+def generate_mermaid_er_diagram(schema_dict: dict) -> str:
+    """
+    Dynamically generate clean, valid Mermaid ER diagram syntax from a database schema.
+    """
+    if not schema_dict or not schema_dict.get("tables"):
+        return "erDiagram\n    DATABASE ||--|| EMPTY_SCHEMA : contains"
+
+    lines = ["erDiagram"]
+    tables = schema_dict.get("tables", [])
+    relationships = schema_dict.get("relationships", [])
+
+    # 1. Render tables and columns
+    for table in tables:
+        t_name = _sanitize_mermaid_identifier(table.get("name", "table"))
+        lines.append(f"    {t_name} {{")
+        columns = table.get("columns", [])
+        if not columns:
+            lines.append("        string id PK")
+        else:
+            for col in columns:
+                c_name = _sanitize_mermaid_identifier(col.get("name", "col"))
+                c_type = _sanitize_mermaid_type(col.get("data_type", "string"))
+                is_pk = col.get("is_primary_key", False)
+                is_fk = col.get("is_foreign_key", False)
+
+                key_label = ""
+                if is_pk and is_fk:
+                    key_label = " PK,FK"
+                elif is_pk:
+                    key_label = " PK"
+                elif is_fk:
+                    key_label = " FK"
+
+                # Comments can include nullability or defaults
+                comment = ""
+                if col.get("is_nullable") is False and not is_pk:
+                    comment = ' "NOT NULL"'
+
+                lines.append(f"        {c_type} {c_name}{key_label}{comment}")
+        lines.append("    }")
+
+    # 2. Render relationships (foreign keys)
+    seen_rel = set()
+    for rel in relationships:
+        from_t = _sanitize_mermaid_identifier(rel.get("from_table", ""))
+        to_t = _sanitize_mermaid_identifier(rel.get("to_table", ""))
+        from_c = rel.get("from_column", "")
+        to_c = rel.get("to_column", "")
+
+        if from_t and to_t:
+            rel_key = f"{from_t}_{from_c}_{to_t}_{to_c}"
+            if rel_key not in seen_rel:
+                seen_rel.add(rel_key)
+                label = f"{from_c}_to_{to_c}" if from_c and to_c else "references"
+                # to_table (1) has many from_table (*) records
+                lines.append(f'    {to_t} ||--o{{ {from_t} : "{label}"')
+
+    # Also inspect foreign keys within table columns if relationships list was empty
+    if not relationships:
+        for table in tables:
+            from_t = _sanitize_mermaid_identifier(table.get("name", ""))
+            for col in table.get("columns", []):
+                if col.get("is_foreign_key") and col.get("references_table"):
+                    to_t = _sanitize_mermaid_identifier(col.get("references_table", ""))
+                    from_c = col.get("name", "")
+                    to_c = col.get("references_column", "id")
+                    rel_key = f"{from_t}_{from_c}_{to_t}_{to_c}"
+                    if rel_key not in seen_rel:
+                        seen_rel.add(rel_key)
+                        label = f"{from_c}_to_{to_c}" if from_c else "references"
+                        lines.append(f'    {to_t} ||--o{{ {from_t} : "{label}"')
+
+    return "\n".join(lines)
 
 
 async def analyze_and_cache_schema(
@@ -203,3 +300,20 @@ def _select_relevant_tables(question: str, tables: list[dict], max_tables: int) 
     # Sort by score descending
     scored.sort(key=lambda x: x[0], reverse=True)
     return [t for _, t in scored[:max_tables]]
+
+
+async def get_full_schema_metadata(
+    db: AsyncSession,
+    database_connection_id: str,
+) -> Optional[dict]:
+    """Retrieve the full cached schema metadata for a database connection."""
+    result = await db.execute(
+        select(SchemaMetadata).where(
+            SchemaMetadata.database_connection_id == database_connection_id
+        )
+    )
+    metadata = result.scalar_one_or_none()
+    if not metadata or not metadata.full_schema:
+        return None
+    return metadata.full_schema
+

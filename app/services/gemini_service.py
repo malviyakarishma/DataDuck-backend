@@ -98,9 +98,49 @@ Visualization selection rules:
 
 CRITICAL: Base your answer ONLY on the data provided. Never invent numbers or facts.
 If results are empty, say "No matching records were found for this query."
-If data is insufficient to answer fully, say so clearly.
+If data is insufficient to answer fully, say so clearly."""
 
-Respond ONLY with the JSON object."""
+INTENT_CLASSIFICATION_SYSTEM_PROMPT = """You are DataDuck's AI query intent classifier.
+Analyze the user's message in the context of database analysis.
+
+Classify the message into EXACTLY ONE of these categories:
+1. DATA_QUERY: The user wants to retrieve, calculate, filter, count, aggregate, or analyze actual data records (e.g., "top 5 products", "revenue this year", "users who signed up yesterday", "find duplicate emails").
+2. SCHEMA_EXPLORATION: The user asks about database structure, schema, tables list, column definitions, data types, primary keys, foreign keys, relationships, constraints, or requests an ER diagram (e.g., "explain database schema", "what tables exist", "explain users table", "show columns in orders", "how are users and orders related", "show ER diagram").
+3. CASUAL_CHAT: Greetings, introductory questions, capabilities, assistant identity, pleasantries, or general help (e.g., "hi", "who are you", "what can you do", "thanks").
+4. WRITE_REQUEST: Requests to write, insert, update, modify, delete, drop, alter, truncate, or create tables/data (e.g., "delete user 10", "update status to active", "drop table test").
+
+You MUST respond with valid JSON:
+{
+  "intent": "DATA_QUERY" | "SCHEMA_EXPLORATION" | "CASUAL_CHAT" | "WRITE_REQUEST"
+}
+IMPORTANT: Respond ONLY with the JSON object."""
+
+SCHEMA_EXPLORATION_SYSTEM_PROMPT = """You are DataDuck's database schema expert.
+Your job is to clearly, thoroughly, and professionally explain database architecture, tables, columns, constraints, foreign keys, and relationships based on the provided schema metadata.
+
+GUIDELINES:
+1. Use clean GitHub markdown with headings, bullet points, bold keywords, and concise tables where helpful.
+2. When explaining tables: mention table name, row count if known, primary keys, foreign keys, and purpose.
+3. When explaining columns: list column names, data types, whether they are nullable or non-nullable, and default values if present.
+4. When explaining relationships: explain how tables connect (e.g., `orders.user_id` -> `users.id`), noting the direction (e.g., each user can have multiple orders).
+5. When the user asks for an ER diagram or schema diagram: provide a clear summary of all entities and relationships in the schema and state that the ER diagram has been rendered.
+6. Base your response strictly on the schema provided. Never invent non-existent tables or columns.
+
+You MUST respond with valid JSON:
+{
+  "answer": "Detailed markdown explanation of the schema/tables/columns/relationships.",
+  "insights": ["Key schema insight 1", "Key schema insight 2"],
+  "warnings": [],
+  "data_quality_notes": []
+}
+IMPORTANT: Respond ONLY with the JSON object."""
+
+CASUAL_CHAT_SYSTEM_PROMPT = """You are DataDuck, an AI-powered read-only database analyst and assistant ("Ask. Dig. Discover.").
+You help users explore database schemas, query data using plain English, generate charts and visualizations, and render dynamic ER diagrams.
+Always maintain a friendly, knowledgeable, and helpful tone.
+Emphasize that DataDuck is strictly read-only for database safety.
+Respond with natural, concise conversational text."""
+
 
 
 class GeminiService(AIProvider):
@@ -118,6 +158,21 @@ class GeminiService(AIProvider):
                 "top_k": 40,
                 "max_output_tokens": 4096,
                 "response_mime_type": "application/json",
+            },
+            safety_settings={
+                HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
+                HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
+                HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
+                HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
+            }
+        )
+        self._text_model = genai.GenerativeModel(
+            model_name=settings.GEMINI_MODEL,
+            generation_config={
+                "temperature": 0.7,
+                "top_p": 0.95,
+                "top_k": 40,
+                "max_output_tokens": 2048,
             },
             safety_settings={
                 HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
@@ -216,10 +271,110 @@ Analyze these results and provide a clear, professional answer:"""
             logger.error(f"Gemini analysis error: {type(e).__name__}: {e}")
             raise AIServiceError(f"AI analysis error: {str(e)}")
 
+    async def classify_intent(
+        self,
+        user_question: str,
+        conversation_history: list[dict],
+    ) -> str:
+        """Classify user intent using Gemini with rule-based fallback."""
+        from app.services.ai_provider import (
+            quick_classify_intent, INTENT_DATA_QUERY, INTENT_SCHEMA_EXPLORATION,
+            INTENT_CASUAL_CHAT, INTENT_WRITE_REQUEST, ALL_INTENTS
+        )
+        # Fast path check
+        quick = quick_classify_intent(user_question)
+        if quick:
+            return quick
+
+        history_text = self._format_history(conversation_history)
+        prompt = f"""{INTENT_CLASSIFICATION_SYSTEM_PROMPT}
+
+CONVERSATION HISTORY:
+{history_text}
+
+USER MESSAGE: {user_question}
+
+Classify the user intent:"""
+
+        try:
+            response = await self._model.generate_content_async(prompt)
+            raw = self._clean_json_response(response.text.strip())
+            data = json.loads(raw)
+            intent = data.get("intent", "").upper().strip()
+            if intent in ALL_INTENTS:
+                return intent
+            return INTENT_DATA_QUERY
+        except Exception as e:
+            logger.warning(f"Gemini intent classification failed: {e}. Defaulting to DATA_QUERY.")
+            return INTENT_DATA_QUERY
+
+    async def answer_schema_question(
+        self,
+        user_question: str,
+        full_schema: dict,
+        db_type: str,
+        conversation_history: list[dict],
+    ) -> AnalysisResult:
+        """Answer database schema structure and relationship questions using Gemini."""
+        history_text = self._format_history(conversation_history)
+        schema_text = json.dumps(full_schema, indent=2, default=str)
+
+        prompt = f"""{SCHEMA_EXPLORATION_SYSTEM_PROMPT}
+
+DATABASE TYPE: {db_type}
+
+DATABASE SCHEMA METADATA:
+{schema_text}
+
+CONVERSATION HISTORY:
+{history_text}
+
+USER QUESTION ABOUT SCHEMA: {user_question}
+
+Explain the requested schema details accurately and clearly:"""
+
+        try:
+            response = await self._model.generate_content_async(prompt)
+            raw = self._clean_json_response(response.text.strip())
+            data = json.loads(raw)
+            return AnalysisResult(**data)
+        except Exception as e:
+            logger.error(f"Gemini schema exploration error: {e}")
+            # Fallback direct response
+            return AnalysisResult(
+                answer=f"Here is the schema overview for this {db_type} database:\n\n" +
+                       f"- Total tables: {full_schema.get('total_tables', len(full_schema.get('tables', [])))}\n" +
+                       f"- Tables: {', '.join(t.get('name', '') for t in full_schema.get('tables', []))}",
+                insights=["Use the Schema Explorer button to inspect full columns and relationships."],
+            )
+
+    async def handle_casual_chat(
+        self,
+        user_question: str,
+        conversation_history: list[dict],
+    ) -> str:
+        """Generate a natural conversational response."""
+        history_text = self._format_history(conversation_history)
+        prompt = f"""{CASUAL_CHAT_SYSTEM_PROMPT}
+
+CONVERSATION HISTORY:
+{history_text}
+
+USER MESSAGE: {user_question}
+
+Response:"""
+
+        try:
+            response = await self._text_model.generate_content_async(prompt)
+            return response.text.strip()
+        except Exception as e:
+            logger.error(f"Gemini casual chat error: {e}")
+            return "Hello! I am DataDuck, your read-only database assistant. Ask me questions about your data, database schema, or request an ER diagram!"
+
     async def handle_write_intent(self, user_question: str) -> str:
         return (
             "This database connection is read-only. I can analyze the data, "
-            "run queries, generate visualizations, and identify patterns — but I "
+            "run queries, generate visualizations, explain schemas, and create ER diagrams — but I "
             "cannot modify, delete, insert, or alter any data. "
             "If you need to make changes, please connect directly to your database."
         )

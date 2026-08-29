@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Optional
 import logging
+import time
 
 from app.core.database import get_db
 from app.api.deps import get_current_user_dep
@@ -34,6 +35,7 @@ async def chat(
     db: AsyncSession = Depends(get_db),
 ):
     """Main chat endpoint — processes a user question against their connected database."""
+    req_t0 = time.perf_counter()
     try:
         # Validate database access
         conn = await get_database_by_id(db, request.database_id, str(current_user.id))
@@ -85,6 +87,7 @@ async def chat(
                 "value_key": v.get("value_key"),
                 "label_key": v.get("label_key"),
                 "format": v.get("format"),
+                "mermaid": v.get("mermaid") or (v.get("value_key") if v.get("type") == "er_diagram" else None),
             }
 
         # Build query result
@@ -106,6 +109,7 @@ async def chat(
             answer=pipeline_result.answer,
             structured_response={
                 **structured,
+                "intent": pipeline_result.intent,
                 "result": result_data,
                 "visualization": viz,
             },
@@ -116,6 +120,9 @@ async def chat(
             execution_time_ms=pipeline_result.result.execution_time_ms if pipeline_result.result else None,
         )
 
+        total_req_ms = (time.perf_counter() - req_t0) * 1000.0
+        logger.info(f"🏁 [CHAT ENDPOINT COMPLETE] Total HTTP handler time: {total_req_ms:.1f}ms ({total_req_ms/1000:.2f}s)")
+
         return ChatResponse(
             conversation_id=str(conversation.id),
             conversation_title=conversation.title,
@@ -125,6 +132,7 @@ async def chat(
                 answer=pipeline_result.answer,
                 insights=pipeline_result.insights,
                 warnings=pipeline_result.warnings,
+                intent=pipeline_result.intent,
                 query=QueryInfo(
                     display=bool(pipeline_result.query),
                     language=pipeline_result.query_language or "sql",
@@ -208,6 +216,7 @@ async def get_messages(
                 answer=msg.content,
                 insights=sr.get("insights", []),
                 warnings=sr.get("warnings", []),
+                intent=sr.get("intent"),
                 query=QueryInfo(
                     display=True,
                     language=msg.query_language or "sql",

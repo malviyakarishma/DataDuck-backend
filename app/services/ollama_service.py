@@ -15,7 +15,11 @@ from typing import Optional
 import httpx
 
 from app.services.ai_provider import AIProvider, QueryGenerationResult, AnalysisResult
-from app.services.gemini_service import QUERY_GENERATION_SYSTEM_PROMPT, ANALYSIS_SYSTEM_PROMPT
+from app.services.gemini_service import (
+    QUERY_GENERATION_SYSTEM_PROMPT, ANALYSIS_SYSTEM_PROMPT,
+    INTENT_CLASSIFICATION_SYSTEM_PROMPT, SCHEMA_EXPLORATION_SYSTEM_PROMPT,
+    CASUAL_CHAT_SYSTEM_PROMPT
+)
 from app.core.config import settings
 from app.core.exceptions import AIServiceError
 
@@ -30,8 +34,23 @@ class OllamaService(AIProvider):
         self.model = settings.OLLAMA_MODEL or "qwen2.5-coder:7b"
         self.api_url = f"{self.base_url}/api/chat"
 
-    async def _call_ollama(self, system_prompt: str, user_prompt: str) -> dict:
-        """Call Ollama chat endpoint and parse JSON response."""
+    async def _call_ollama(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        action_name: str = "llm_call",
+        temperature: float = 0.1,
+        num_predict: Optional[int] = None,
+    ) -> dict:
+        """Call Ollama chat endpoint and parse JSON response with detailed performance timing."""
+        import time
+
+        options = {
+            "temperature": temperature,
+        }
+        if num_predict:
+            options["num_predict"] = num_predict
+
         payload = {
             "model": self.model,
             "messages": [
@@ -40,22 +59,27 @@ class OllamaService(AIProvider):
             ],
             "format": "json",
             "stream": False,
-            "options": {
-                "temperature": 0.1,
-            },
+            "options": options,
         }
 
-        async with httpx.AsyncClient(timeout=120.0) as client:
+        prompt_char_len = len(system_prompt) + len(user_prompt)
+        logger.info(f"⏳ [OLLAMA START] Action: '{action_name}' | Model: '{self.model}' | Prompt Length: ~{prompt_char_len} chars")
+
+        t_start = time.perf_counter()
+
+        async with httpx.AsyncClient(timeout=180.0) as client:
             try:
                 response = await client.post(self.api_url, json=payload)
-                
+                t_end = time.perf_counter()
+                http_duration_ms = (t_end - t_start) * 1000.0
+
                 if response.status_code == 404:
                     logger.error(f"Ollama model '{self.model}' not found.")
                     raise AIServiceError(
                         f"The configured Ollama model '{self.model}' was not found. "
                         f"Please run 'ollama pull {self.model}' in your terminal."
                     )
-                
+
                 if response.status_code != 200:
                     err_text = response.text[:200]
                     logger.error(f"Ollama API Error ({response.status_code}): {err_text}")
@@ -65,7 +89,30 @@ class OllamaService(AIProvider):
                 content = data.get("message", {}).get("content", "")
                 if not content:
                     raise AIServiceError("Ollama returned an empty response.")
+
+                # Extract Ollama's internal timing and token metrics
+                total_duration_ms = data.get("total_duration", 0) / 1e6
+                load_duration_ms = data.get("load_duration", 0) / 1e6
+                prompt_eval_duration_ms = data.get("prompt_eval_duration", 0) / 1e6
+                eval_duration_ms = data.get("eval_duration", 0) / 1e6
+                prompt_eval_count = data.get("prompt_eval_count", 0)
+                eval_count = data.get("eval_count", 0)
                 
+                tok_per_sec = (eval_count / (eval_duration_ms / 1000.0)) if eval_duration_ms > 0 else 0.0
+
+                logger.info(
+                    f"⏱️ [OLLAMA TIMING] Action: '{action_name}' | Total HTTP: {http_duration_ms:.1f}ms ({http_duration_ms/1000:.2f}s) | "
+                    f"Ollama Internal: {total_duration_ms:.1f}ms | Load: {load_duration_ms:.1f}ms | "
+                    f"Prompt Eval: {prompt_eval_duration_ms:.1f}ms ({prompt_eval_count} tokens) | "
+                    f"Generation: {eval_duration_ms:.1f}ms ({eval_count} tokens @ {tok_per_sec:.1f} tok/s)"
+                )
+
+                if http_duration_ms > 15000:
+                    logger.warning(
+                        f"⚠️ [OLLAMA SLOW] Action '{action_name}' took {http_duration_ms/1000:.1f}s. "
+                        f"Speed: {tok_per_sec:.1f} tokens/s. (If < 15 tok/s, model is likely running on CPU instead of GPU)."
+                    )
+
                 cleaned = self._clean_json_response(content)
                 return json.loads(cleaned)
 
@@ -108,7 +155,13 @@ USER QUESTION: {user_question}
 Generate the appropriate read-only {db_type} query:"""
 
         try:
-            parsed_data = await self._call_ollama(QUERY_GENERATION_SYSTEM_PROMPT, prompt)
+            parsed_data = await self._call_ollama(
+                system_prompt=QUERY_GENERATION_SYSTEM_PROMPT,
+                user_prompt=prompt,
+                action_name="query_generation",
+                temperature=0.1,
+                num_predict=512,
+            )
             
             # Clean any leftover markdown code blocks in raw SQL field if present
             if isinstance(parsed_data.get("query"), str):
@@ -152,7 +205,13 @@ CONVERSATION HISTORY (for context):
 Analyze these results and provide a clear, professional answer:"""
 
         try:
-            parsed_data = await self._call_ollama(ANALYSIS_SYSTEM_PROMPT, prompt)
+            parsed_data = await self._call_ollama(
+                system_prompt=ANALYSIS_SYSTEM_PROMPT,
+                user_prompt=prompt,
+                action_name="result_analysis",
+                temperature=0.1,
+                num_predict=1024,
+            )
             result = AnalysisResult(**parsed_data)
             return result
         except Exception as e:
@@ -161,10 +220,139 @@ Analyze these results and provide a clear, professional answer:"""
             logger.error(f"Ollama analysis error: {e}")
             raise AIServiceError(f"AI analysis error: {str(e)}")
 
+    async def classify_intent(
+        self,
+        user_question: str,
+        conversation_history: list[dict],
+    ) -> str:
+        """Classify user intent using Ollama with fast heuristic check."""
+        from app.services.ai_provider import (
+            quick_classify_intent, INTENT_DATA_QUERY, INTENT_SCHEMA_EXPLORATION,
+            INTENT_CASUAL_CHAT, INTENT_WRITE_REQUEST, ALL_INTENTS
+        )
+        quick = quick_classify_intent(user_question)
+        if quick:
+            return quick
+
+        history_text = self._format_history(conversation_history)
+        prompt = f"""{INTENT_CLASSIFICATION_SYSTEM_PROMPT}
+
+CONVERSATION HISTORY:
+{history_text}
+
+USER MESSAGE: {user_question}
+
+Classify the user intent:"""
+
+        try:
+            parsed = await self._call_ollama(
+                system_prompt=INTENT_CLASSIFICATION_SYSTEM_PROMPT,
+                user_prompt=prompt,
+                action_name="intent_classification",
+                temperature=0.1,
+                num_predict=64,
+            )
+            intent = parsed.get("intent", "").upper().strip()
+            if intent in ALL_INTENTS:
+                return intent
+            return INTENT_DATA_QUERY
+        except Exception as e:
+            logger.warning(f"Ollama intent classification failed: {e}. Defaulting to DATA_QUERY.")
+            return INTENT_DATA_QUERY
+
+    async def answer_schema_question(
+        self,
+        user_question: str,
+        full_schema: dict,
+        db_type: str,
+        conversation_history: list[dict],
+    ) -> AnalysisResult:
+        """Answer schema exploration questions using Ollama."""
+        history_text = self._format_history(conversation_history)
+        schema_text = json.dumps(full_schema, indent=2, default=str)
+
+        prompt = f"""{SCHEMA_EXPLORATION_SYSTEM_PROMPT}
+
+DATABASE TYPE: {db_type}
+
+DATABASE SCHEMA METADATA:
+{schema_text}
+
+CONVERSATION HISTORY:
+{history_text}
+
+USER QUESTION ABOUT SCHEMA: {user_question}
+
+Explain the requested schema details accurately and clearly:"""
+
+        try:
+            parsed_data = await self._call_ollama(
+                system_prompt=SCHEMA_EXPLORATION_SYSTEM_PROMPT,
+                user_prompt=prompt,
+                action_name="schema_explanation",
+                temperature=0.1,
+                num_predict=1024,
+            )
+            return AnalysisResult(**parsed_data)
+        except Exception as e:
+            logger.error(f"Ollama schema exploration error: {e}")
+            return AnalysisResult(
+                answer=f"Here is the schema overview for this {db_type} database:\n\n" +
+                       f"- Total tables: {full_schema.get('total_tables', len(full_schema.get('tables', [])))}\n" +
+                       f"- Tables: {', '.join(t.get('name', '') for t in full_schema.get('tables', []))}",
+                insights=["Use the Schema Explorer button to inspect full columns and relationships."],
+            )
+
+    async def handle_casual_chat(
+        self,
+        user_question: str,
+        conversation_history: list[dict],
+    ) -> str:
+        """Generate a natural conversational response using Ollama."""
+        import time
+        history_text = self._format_history(conversation_history)
+        prompt = f"""{CASUAL_CHAT_SYSTEM_PROMPT}
+
+CONVERSATION HISTORY:
+{history_text}
+
+USER MESSAGE: {user_question}
+
+Response:"""
+
+        try:
+            payload = {
+                "model": self.model,
+                "messages": [
+                    {"role": "system", "content": CASUAL_CHAT_SYSTEM_PROMPT},
+                    {"role": "user", "content": prompt},
+                ],
+                "stream": False,
+                "options": {"temperature": 0.3, "num_predict": 256},
+            }
+            t_start = time.perf_counter()
+            async with httpx.AsyncClient(timeout=45.0) as client:
+                resp = await client.post(self.api_url, json=payload)
+                t_end = time.perf_counter()
+                if resp.status_code == 200:
+                    data = resp.json()
+                    dur_ms = (t_end - t_start) * 1000.0
+                    eval_count = data.get("eval_count", 0)
+                    eval_duration_ms = data.get("eval_duration", 0) / 1e6
+                    tok_s = (eval_count / (eval_duration_ms / 1000.0)) if eval_duration_ms > 0 else 0
+                    logger.info(f"⏱️ [OLLAMA TIMING] Action: 'casual_chat' | HTTP: {dur_ms:.1f}ms | Generated {eval_count} tokens @ {tok_s:.1f} tok/s")
+                    content = data.get("message", {}).get("content", "").strip()
+                    if content:
+                        return content
+        except Exception as e:
+            logger.warning(f"Ollama casual chat call error: {e}")
+
+        return "Hello! I am DataDuck, your read-only database analyst. Ask me questions about your data, inspect table schemas, or request an ER diagram!"
+
     async def handle_write_intent(self, user_question: str) -> str:
         return (
             "This database connection is read-only. I can analyze the data, "
-            "run queries, generate visualizations, and identify patterns — but I "
+            "run queries, generate visualizations, explain schemas, and create ER diagrams — but I "
             "cannot modify, delete, insert, or alter any data. "
             "If you need to make changes, please connect directly to your database."
         )

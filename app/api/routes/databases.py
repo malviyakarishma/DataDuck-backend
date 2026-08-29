@@ -8,12 +8,14 @@ from app.models.user import User
 from app.models.schema_metadata import SchemaMetadata
 from app.schemas.database import (
     CreateDatabaseRequest, DatabaseResponse, DatabaseListResponse,
-    TestConnectionRequest, TestConnectionResponse, SchemaOverviewResponse
+    TestConnectionRequest, TestConnectionResponse, SchemaOverviewResponse,
+    FullSchemaResponse
 )
 from app.services.database_service import (
     create_database_connection, test_connection_string,
     get_user_databases, get_database_by_id, delete_database, analyze_schema
 )
+from app.services.schema_service import generate_mermaid_er_diagram
 from app.core.exceptions import (
     DatabaseConnectionError, DatabaseNotFoundError, AuthorizationError,
     UnsupportedDatabaseError
@@ -161,3 +163,40 @@ async def get_schema_overview(
         )
     except (DatabaseNotFoundError, AuthorizationError) as e:
         raise HTTPException(status_code=404, detail=e.message)
+
+
+@router.get("/{database_id}/schema", response_model=FullSchemaResponse)
+async def get_full_schema(
+    database_id: str,
+    current_user: User = Depends(get_current_user_dep),
+    db: AsyncSession = Depends(get_db),
+):
+    """Get full schema details including tables, column metadata, constraints, and Mermaid ER diagram."""
+    try:
+        conn = await get_database_by_id(db, database_id, str(current_user.id))
+        result = await db.execute(
+            select(SchemaMetadata).where(
+                SchemaMetadata.database_connection_id == database_id
+            )
+        )
+        meta = result.scalar_one_or_none()
+        if not meta or not meta.full_schema:
+            raise HTTPException(status_code=404, detail="Schema not yet analyzed.")
+
+        full_schema = meta.full_schema
+        mermaid_diagram = generate_mermaid_er_diagram(full_schema)
+
+        return FullSchemaResponse(
+            database_id=database_id,
+            db_type=conn.db_type,
+            database_name=conn.database_name or full_schema.get("database_name", "unknown"),
+            total_tables=meta.total_tables or len(full_schema.get("tables", [])),
+            total_relationships=meta.total_relationships or len(full_schema.get("relationships", [])),
+            tables=full_schema.get("tables", []),
+            relationships=full_schema.get("relationships", []),
+            mermaid_er_diagram=mermaid_diagram,
+            analyzed_at=meta.analyzed_at,
+        )
+    except (DatabaseNotFoundError, AuthorizationError) as e:
+        raise HTTPException(status_code=404, detail=e.message)
+

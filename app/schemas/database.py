@@ -67,13 +67,29 @@ class ColumnSummary(BaseModel):
     is_nullable: bool
     is_primary_key: bool
     is_foreign_key: bool
+    default_value: Optional[str] = None
+    max_length: Optional[int] = None
     references_table: Optional[str] = None
+    references_column: Optional[str] = None
 
 
 class TableSummary(BaseModel):
     name: str
-    row_count: Optional[int]
+    row_count: Optional[int] = None
     column_count: int
     columns: list[ColumnSummary]
-    primary_keys: list[str]
-    foreign_keys: list[dict]
+    primary_keys: list[str] = []
+    foreign_keys: list[dict] = []
+
+
+class FullSchemaResponse(BaseModel):
+    database_id: str
+    db_type: str
+    database_name: str
+    total_tables: int
+    total_relationships: int
+    tables: list[dict]
+    relationships: list[dict]
+    mermaid_er_diagram: str
+    analyzed_at: Optional[datetime] = None
+

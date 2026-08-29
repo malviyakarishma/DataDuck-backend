@@ -131,14 +131,17 @@ def _check_dangerous_patterns(query: str) -> None:
 
 
 def _check_blocked_keywords(query: str) -> None:
-    """Fast keyword check before expensive AST parsing."""
+    """Fast keyword check before expensive AST parsing using word boundaries."""
     query_upper = query.upper()
     first_word = query_upper.strip().split()[0] if query_upper.strip() else ""
 
+    # Immediate block if the primary command keyword is a write command
+    if first_word in BLOCKED_SQL_STATEMENTS:
+        raise WriteOperationError()
+
     for keyword in BLOCKED_SQL_STATEMENTS:
-        if keyword in query_upper:
-            # Check if it's actually a statement keyword, not inside a string
-            # We'll be strict here — block it
+        if re.search(r"\b" + re.escape(keyword) + r"\b", query_upper):
+            # Block any standalone write keyword in statement
             raise WriteOperationError()
 
 
@@ -237,9 +240,10 @@ def is_write_intent(user_message: str) -> bool:
     Used to give early refusal before even calling Gemini.
     """
     write_patterns = [
+        r"\b(delete\s+from|update\s+\w+\s+set|insert\s+into|drop\s+table|alter\s+table|truncate\s+table|create\s+table)\b",
         r"\b(delete|remove|drop|truncate|wipe|clear|erase)\b",
-        r"\b(update|modify|change|edit|alter|set)\b.*\b(record|row|data|value|field)\b",
-        r"\b(insert|add|create|append|put)\b.*\b(record|row|data|entry)\b",
+        r"\b(update|modify|change|edit|alter|set)\b.*\b(record|row|data|value|field|table|database|price|name|status|column)\b",
+        r"\b(insert|add|create|append|put)\b.*\b(record|row|data|entry|user|order|customer|into|values)\b",
         r"\b(update|set)\b.*\bwhere\b",
     ]
     message_lower = user_message.lower()
