@@ -6,14 +6,15 @@ User question → Schema retrieval → Query generation → Validation → Execu
 """
 import json
 import logging
+import re
 import time
-from typing import Optional
+from typing import Any, Optional
 from datetime import datetime, timezone
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.services.ai_provider import (
-    AIProvider, INTENT_DATA_QUERY, INTENT_SCHEMA_EXPLORATION,
+    AIProvider, AnalysisResult, INTENT_DATA_QUERY, INTENT_SCHEMA_EXPLORATION,
     INTENT_CASUAL_CHAT, INTENT_WRITE_REQUEST
 )
 from app.services.schema_service import (
@@ -58,6 +59,168 @@ class QueryPipelineResult:
         self.visualization = visualization
         self.refused = refused
         self.intent = intent
+
+
+def _format_column_title(col_name: str) -> str:
+    """Turn a database column name into a natural title (e.g. 'total_users' -> 'total users')."""
+    clean = col_name.replace("_", " ").strip()
+    replacements = {
+        r"\bavg\b": "average",
+        r"\bpk\b": "primary key",
+        r"\bfk\b": "foreign key",
+        r"\bcnt\b": "count",
+        r"\bnum\b": "number of",
+        r"\bqty\b": "quantity",
+    }
+    for pat, rep in replacements.items():
+        clean = re.sub(pat, rep, clean, flags=re.IGNORECASE)
+    return clean.strip()
+
+
+def _format_scalar_value(val: Any) -> str:
+    """Format scalar number or string with clean decimals/commas."""
+    if val is None:
+        return "None"
+    if isinstance(val, float):
+        if val.is_integer():
+            return f"{int(val):,}"
+        return f"{val:,.2f}"
+    if isinstance(val, int):
+        return f"{val:,}"
+    return str(val)
+
+
+def should_use_llm_for_result_analysis(
+    rows: list[dict],
+    columns: list[str],
+    query: str,
+    user_question: str,
+) -> bool:
+    """
+    Determines if database query results are simple enough to format deterministically
+    without spending ~14+ seconds on an unnecessary LLM inference call.
+
+    Returns False (SKIP LLM) for:
+    - Empty results (0 rows)
+    - Single scalar aggregation (1 row, 1 column: COUNT, SUM, AVG, MIN, MAX, etc.)
+    - Simple 1-row summary aggregation (1 row, <= 3 scalar columns: total_orders, total_revenue)
+
+    Returns True (USE LLM) for:
+    - Multiple rows (> 1 row) representing lists, trends, comparisons, breakdowns
+    - Complex multi-category analytical tables
+    """
+    row_count = len(rows)
+
+    # 1. 0 rows -> Deterministic empty response
+    if row_count == 0:
+        return False
+
+    # 2. 1 row result
+    if row_count == 1:
+        row = rows[0]
+        col_count = len(columns)
+
+        # 1 column (e.g. COUNT, SUM, AVG, MAX, MIN, single metric)
+        if col_count == 1:
+            return False
+
+        # Up to 3 columns if all values are scalars (numbers, strings, dates, booleans)
+        if col_count <= 3:
+            all_scalar = all(
+                v is None or isinstance(v, (int, float, str, bool))
+                for v in row.values()
+            )
+            if all_scalar:
+                return False
+
+    # 3. For multi-row results, use LLM for trend analysis, charting & complex insights
+    return True
+
+
+def format_simple_result(
+    rows: list[dict],
+    columns: list[str],
+    query: str,
+    user_question: str,
+) -> AnalysisResult:
+    """
+    Lightweight, deterministic result formatter for simple scalar queries.
+    Executes in < 1 ms with clean natural phrasing and KPI visualization.
+    """
+    if not rows:
+        return AnalysisResult(
+            answer="No matching records were found for this query.",
+            insights=["Query executed successfully with 0 matching rows."],
+            warnings=[],
+            data_quality_notes=[],
+            visualization=None,
+        )
+
+    row = rows[0]
+
+    # Single column scalar (e.g. COUNT, SUM, AVG, MAX, MIN)
+    if len(columns) == 1:
+        col_name = columns[0]
+        val = row.get(col_name)
+        formatted_val = _format_scalar_value(val)
+        col_title = _format_column_title(col_name)
+        col_lower = col_name.lower()
+
+        # Generate clean natural phrasing
+        if "count" in col_lower or "total" in col_lower or "num" in col_lower or "users" in col_lower or "orders" in col_lower:
+            if col_title.lower().startswith("number of") or col_title.lower().startswith("total"):
+                answer = f"There are **{formatted_val}** {col_title.lower()}."
+            else:
+                answer = f"The total {col_title.lower()} is **{formatted_val}**."
+        elif "avg" in col_lower or "average" in col_lower:
+            answer = f"The {col_title.lower()} is **{formatted_val}**."
+        elif "max" in col_lower or "highest" in col_lower or "maximum" in col_lower:
+            answer = f"The {col_title.lower()} is **{formatted_val}**."
+        elif "min" in col_lower or "lowest" in col_lower or "minimum" in col_lower:
+            answer = f"The {col_title.lower()} is **{formatted_val}**."
+        elif any(kw in col_lower for kw in ("sum", "revenue", "sales", "amount", "cost", "price", "spent", "balance")):
+            answer = f"The {col_title.lower()} is **{formatted_val}**."
+        else:
+            answer = f"The {col_title.lower()} is **{formatted_val}**."
+
+        # KPI visualization for single scalar numbers
+        viz = None
+        if isinstance(val, (int, float)):
+            viz = {
+                "required": True,
+                "type": "kpi",
+                "title": col_title.title(),
+                "value_key": col_name,
+                "format": "currency" if any(kw in col_lower for kw in ("revenue", "price", "sale", "amount", "cost", "dollar")) else "number",
+            }
+
+        return AnalysisResult(
+            answer=answer,
+            insights=[f"{col_title.title()}: {formatted_val}"],
+            warnings=[],
+            data_quality_notes=[],
+            visualization=viz,
+        )
+
+    # 2-3 scalar columns (e.g. {"total_orders": 1200, "total_revenue": 450000.5})
+    parts = []
+    insights = []
+    for col in columns:
+        val = row.get(col)
+        f_val = _format_scalar_value(val)
+        c_title = _format_column_title(col)
+        parts.append(f"{c_title.lower()} is **{f_val}**")
+        insights.append(f"{c_title.title()}: {f_val}")
+
+    answer = "The " + ", and the ".join(parts) + "."
+
+    return AnalysisResult(
+        answer=answer,
+        insights=insights,
+        warnings=[],
+        data_quality_notes=[],
+        visualization=None,
+    )
 
 
 async def run_query_pipeline(
@@ -309,7 +472,7 @@ async def run_query_pipeline(
     t_db_exec_ms = (time.perf_counter() - t_stage_start) * 1000.0
     logger.info(f"⏱️ [STAGE 5: Database Execution] Took {t_db_exec_ms:.1f}ms | Returned {query_result.row_count} rows ({len(query_result.columns)} columns)")
 
-    # Stage 6: Result Analysis via AI
+    # Stage 6: Result Analysis
     t_stage_start = time.perf_counter()
     result_for_analysis = {
         "columns": query_result.columns,
@@ -318,15 +481,36 @@ async def run_query_pipeline(
         "truncated": query_result.truncated,
     }
 
-    analysis = await ai_service.analyze_results(
-        user_question=user_question,
+    use_llm_analysis = should_use_llm_for_result_analysis(
+        rows=query_result.rows,
+        columns=query_result.columns,
         query=str(validated_query),
-        query_result=result_for_analysis,
-        db_type=db_type,
-        conversation_history=conversation_history,
+        user_question=user_question,
     )
-    t_analysis_ms = (time.perf_counter() - t_stage_start) * 1000.0
-    logger.info(f"⏱️ [STAGE 6: AI Result Analysis] Took {t_analysis_ms:.1f}ms ({t_analysis_ms/1000:.2f}s)")
+
+    if use_llm_analysis:
+        logger.info(f"🧠 [STAGE 6: Result Analysis] Complex result ({query_result.row_count} rows, {len(query_result.columns)} cols) -> Invoking AI Service...")
+        analysis = await ai_service.analyze_results(
+            user_question=user_question,
+            query=str(validated_query),
+            query_result=result_for_analysis,
+            db_type=db_type,
+            conversation_history=conversation_history,
+        )
+        t_analysis_ms = (time.perf_counter() - t_stage_start) * 1000.0
+        analysis_method_label = "AI Analysis (LLM)"
+        logger.info(f"⏱️ [STAGE 6: AI Result Analysis] Took {t_analysis_ms:.1f}ms ({t_analysis_ms/1000:.2f}s) via LLM")
+    else:
+        logger.info(f"⚡ [STAGE 6: Result Analysis] Simple scalar result ({query_result.row_count} rows, {len(query_result.columns)} cols) -> Fast deterministic formatter (Skipping LLM call)")
+        analysis = format_simple_result(
+            rows=query_result.rows,
+            columns=query_result.columns,
+            query=str(validated_query),
+            user_question=user_question,
+        )
+        t_analysis_ms = (time.perf_counter() - t_stage_start) * 1000.0
+        analysis_method_label = "Fast Formatter (No LLM)"
+        logger.info(f"⏱️ [STAGE 6: Fast Result Formatter] Took {t_analysis_ms:.2f}ms (Saved ~14s LLM call!)")
 
     # End-of-Pipeline Summary
     t_total_pipeline_ms = (time.perf_counter() - pipeline_t0) * 1000.0
@@ -336,12 +520,12 @@ async def run_query_pipeline(
         f"================================================================================\n"
         f"📊 [DATADUCK PIPELINE TIMING SUMMARY]\n"
         f"├─ Question           : \"{user_question[:60]}\"\n"
-        f"├─ Intent Classify    : {t_intent_ms:8.1f} ms  ({t_intent_ms/t_total_pipeline_ms*100:4.1f}%)\n"
+        f"├─ Intent Classify    : {t_intent_ms:8.1f} ms  ({t_intent_ms/t_total_pipeline_ms*100:4.1f}%) [Deterministic: 0 LLM]\n"
         f"├─ Schema Retrieval   : {t_schema_retrieval_ms:8.1f} ms  ({t_schema_retrieval_ms/t_total_pipeline_ms*100:4.1f}%)\n"
-        f"├─ AI Query Gen (LLM) : {t_query_gen_ms:8.1f} ms  ({t_query_gen_ms/t_total_pipeline_ms*100:4.1f}%)\n"
+        f"├─ AI Query Gen (LLM) : {t_query_gen_ms:8.1f} ms  ({t_query_gen_ms/t_total_pipeline_ms*100:4.1f}%) [Ollama 1 LLM Call]\n"
         f"├─ AST Validation     : {t_validation_ms:8.1f} ms  ({t_validation_ms/t_total_pipeline_ms*100:4.1f}%)\n"
         f"├─ DB Execution       : {t_db_exec_ms:8.1f} ms  ({t_db_exec_ms/t_total_pipeline_ms*100:4.1f}%)\n"
-        f"├─ AI Analysis (LLM)  : {t_analysis_ms:8.1f} ms  ({t_analysis_ms/t_total_pipeline_ms*100:4.1f}%)\n"
+        f"├─ Result Analysis    : {t_analysis_ms:8.1f} ms  ({t_analysis_ms/t_total_pipeline_ms*100:4.1f}%) [{analysis_method_label}]\n"
         f"────────────────────────────────────────────────────────────────────────────────\n"
         f"⏱️ TOTAL PIPELINE TIME: {t_total_pipeline_ms:8.1f} ms  ({t_total_pipeline_ms/1000.0:.2f}s)\n"
         f"================================================================================"

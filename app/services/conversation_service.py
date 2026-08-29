@@ -170,10 +170,29 @@ async def delete_conversation(
     conversation_id: str,
     user_id: str,
 ) -> None:
-    """Delete a conversation."""
+    """Delete a single conversation."""
     conv = await get_conversation_with_auth(db, conversation_id, user_id)
     await db.delete(conv)
     await db.flush()
+
+
+async def delete_all_conversations(
+    db: AsyncSession,
+    user_id: str,
+    database_id: Optional[str] = None,
+) -> int:
+    """Delete all conversations for a user (optionally filtered by database)."""
+    query = select(Conversation).where(Conversation.user_id == user_id)
+    if database_id:
+        query = query.where(Conversation.database_id == database_id)
+    
+    result = await db.execute(query)
+    convs = result.scalars().all()
+    count = len(convs)
+    for conv in convs:
+        await db.delete(conv)
+    await db.flush()
+    return count
 
 
 def _generate_title(first_message: str) -> str:

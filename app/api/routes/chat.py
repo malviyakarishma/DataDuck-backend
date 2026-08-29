@@ -14,7 +14,8 @@ from app.schemas.chat import (
 from app.services.conversation_service import (
     get_or_create_conversation, get_conversation_history,
     save_user_message, save_assistant_message,
-    get_user_conversations, get_conversation_messages, delete_conversation
+    get_user_conversations, get_conversation_messages,
+    delete_conversation, delete_all_conversations
 )
 from app.services.database_service import get_database_by_id
 from app.services.query_service import run_query_pipeline
@@ -246,3 +247,14 @@ async def remove_conversation(
         await delete_conversation(db, conversation_id, str(current_user.id))
     except (DatabaseNotFoundError, AuthorizationError) as e:
         raise HTTPException(status_code=404, detail=e.message)
+
+
+@router.delete("/conversations", status_code=status.HTTP_200_OK)
+async def remove_all_conversations(
+    database_id: Optional[str] = None,
+    current_user: User = Depends(get_current_user_dep),
+    db: AsyncSession = Depends(get_db),
+):
+    """Delete all conversations for the user (optionally filtered by database)."""
+    deleted_count = await delete_all_conversations(db, str(current_user.id), database_id)
+    return {"deleted": deleted_count}

@@ -59,6 +59,7 @@ class OllamaService(AIProvider):
             ],
             "format": "json",
             "stream": False,
+            "keep_alive": "10m",
             "options": options,
         }
 
@@ -225,40 +226,9 @@ Analyze these results and provide a clear, professional answer:"""
         user_question: str,
         conversation_history: list[dict],
     ) -> str:
-        """Classify user intent using Ollama with fast heuristic check."""
-        from app.services.ai_provider import (
-            quick_classify_intent, INTENT_DATA_QUERY, INTENT_SCHEMA_EXPLORATION,
-            INTENT_CASUAL_CHAT, INTENT_WRITE_REQUEST, ALL_INTENTS
-        )
-        quick = quick_classify_intent(user_question)
-        if quick:
-            return quick
-
-        history_text = self._format_history(conversation_history)
-        prompt = f"""{INTENT_CLASSIFICATION_SYSTEM_PROMPT}
-
-CONVERSATION HISTORY:
-{history_text}
-
-USER MESSAGE: {user_question}
-
-Classify the user intent:"""
-
-        try:
-            parsed = await self._call_ollama(
-                system_prompt=INTENT_CLASSIFICATION_SYSTEM_PROMPT,
-                user_prompt=prompt,
-                action_name="intent_classification",
-                temperature=0.1,
-                num_predict=64,
-            )
-            intent = parsed.get("intent", "").upper().strip()
-            if intent in ALL_INTENTS:
-                return intent
-            return INTENT_DATA_QUERY
-        except Exception as e:
-            logger.warning(f"Ollama intent classification failed: {e}. Defaulting to DATA_QUERY.")
-            return INTENT_DATA_QUERY
+        """Fast deterministic intent routing without calling LLM (< 1 ms)."""
+        from app.services.ai_provider import deterministic_classify_intent
+        return deterministic_classify_intent(user_question)
 
     async def answer_schema_question(
         self,
@@ -328,6 +298,7 @@ Response:"""
                     {"role": "user", "content": prompt},
                 ],
                 "stream": False,
+                "keep_alive": "10m",
                 "options": {"temperature": 0.3, "num_predict": 256},
             }
             t_start = time.perf_counter()
