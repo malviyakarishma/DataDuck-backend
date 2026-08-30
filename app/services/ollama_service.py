@@ -164,6 +164,10 @@ Generate the appropriate read-only {db_type} query:"""
                 num_predict=512,
             )
             
+            if isinstance(parsed_data, dict):
+                if not parsed_data.get("database_type"):
+                    parsed_data["database_type"] = db_type
+
             # Clean any leftover markdown code blocks in raw SQL field if present
             if isinstance(parsed_data.get("query"), str):
                 parsed_data["query"] = self._strip_markdown_code_fences(parsed_data["query"])

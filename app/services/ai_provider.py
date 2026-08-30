@@ -65,13 +65,17 @@ def deterministic_classify_intent(user_question: str) -> str:
         r"\b(database\s+diagram|schema\s+diagram|table\s+diagram)\b",
         r"\b(show|describe|explain|view|get|list|display)\b.*\b(schema|database\s+structure|architecture)\b",
         r"\b(database\s+schema|schema|data\s+dictionary)\b",
-        r"\b(show\s+tables|list\s+tables|what\s+tables|tables\s+in\s+(the\s+)?database|all\s+tables)\b",
-        r"^(tables|columns|relationships)$",
-        r"\b(explain|describe|show|list|get)\b.*\b(columns|fields|attributes|keys)\b",
+        r"\b(show\s+tables|list\s+tables|what\s+tables|tables\s+in\s+(the\s+)?database|all\s+tables|all\s+collections)\b",
+        r"\b(how\s+many\s+(tables?|collections?|entities?|models?))\b",
+        r"\b(total\s+(number\s+of\s+)?(tables?|collections?))\b",
+        r"\b(count\s+of\s+(tables?|collections?)|(table|collection)\s+count)\b",
+        r"^(tables|columns|relationships|collections)$",
+        r"\b(explain|describe|show|list|get)\b.*\b(columns|fields|attributes|keys|collections)\b",
         r"\b(primary\s+key|foreign\s+key|pk|fk)\b",
         r"\b(relationships?|table\s+relations?|foreign\s+keys?)\b",
         r"\b(how\s+are\s+\w+\s+and\s+\w+\s+related)\b",
-        r"\b(explain\s+the\s+\w+\s+table|describe\s+the\s+\w+\s+table)\b",
+        r"\b(explain\s+the\s+\w+\s+(table|collection)|describe\s+the\s+\w+\s+(table|collection))\b",
+        r"\b(what\s+(tables?|collections?)\s+(are\s+in|exist\s+in|does\s+this\s+(app|db|database)\s+have))\b",
         r"\b(what\s+tables\s+are\s+in\s+my\s+database|what\s+tables\s+exist)\b",
     ]
     for pattern in schema_patterns:
@@ -87,25 +91,88 @@ def quick_classify_intent(user_question: str) -> str:
     return deterministic_classify_intent(user_question)
 
 
+import json
+from pydantic import BaseModel, model_validator
+
+
 class QueryGenerationResult(BaseModel):
     """Structured result from AI query generation."""
-    operation: str  # "query", "aggregate", "count", etc.
-    database_type: str
-    query: str  # SQL string or MongoDB operation JSON string
+    operation: str = "query"  # "query", "aggregate", "count", etc.
+    database_type: str = "unknown"
+    query: str = ""  # SQL string or MongoDB operation JSON string
     query_dict: Optional[dict] = None  # For MongoDB operations
-    explanation: str
+    explanation: str = "Generated database query."
     is_read_only: bool = True
     refused: bool = False
     refusal_reason: Optional[str] = None
 
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_input(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return {
+                "query": str(data) if data else "",
+                "operation": "query",
+                "database_type": "unknown",
+                "explanation": "Generated database query.",
+            }
+
+        # If query is a dictionary (common in MongoDB LLM outputs)
+        q = data.get("query")
+        if isinstance(q, dict):
+            data["query_dict"] = q
+            data["query"] = json.dumps(q)
+        elif not q and any(k in data for k in ("aggregate", "find", "collection", "pipeline")):
+            # The root object itself is the MongoDB query
+            data["query_dict"] = data.copy()
+            data["query"] = json.dumps(data)
+        elif q is None:
+            data["query"] = ""
+
+        # Default missing operation
+        if not data.get("operation"):
+            if isinstance(q, dict) and "aggregate" in q:
+                data["operation"] = "aggregate"
+            elif isinstance(q, dict) and "find" in q:
+                data["operation"] = "find"
+            else:
+                data["operation"] = "query"
+
+        # Default missing database_type
+        if not data.get("database_type"):
+            data["database_type"] = "mongodb" if isinstance(q, dict) or "collection" in data else "sql"
+
+        # Default missing explanation
+        if not data.get("explanation"):
+            data["explanation"] = "Generated database query based on your question."
+
+        return data
+
 
 class AnalysisResult(BaseModel):
     """Structured result from AI result analysis or schema exploration."""
-    answer: str
+    answer: str = ""
     insights: list[str] = []
     warnings: list[str] = []
     visualization: Optional[dict] = None  # Visualization spec or ER diagram spec
     data_quality_notes: list[str] = []
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_analysis(cls, data: Any) -> Any:
+        if isinstance(data, str):
+            return {"answer": data, "insights": [], "warnings": [], "visualization": None, "data_quality_notes": []}
+        if isinstance(data, dict):
+            if not data.get("answer"):
+                data["answer"] = data.get("explanation") or data.get("response") or data.get("summary") or "Analysis completed."
+            if not isinstance(data.get("insights"), list):
+                data["insights"] = []
+            if not isinstance(data.get("warnings"), list):
+                data["warnings"] = []
+            if not isinstance(data.get("data_quality_notes"), list):
+                data["data_quality_notes"] = []
+            return data
+        return {"answer": str(data), "insights": [], "warnings": [], "visualization": None, "data_quality_notes": []}
 
 
 class AIProvider(ABC):
