@@ -1,4 +1,4 @@
-# 🦆 DataDuck Backend — Ask. Dig. Discover.
+# 🦆 DataDuck Backend — Doubt. Dig. Discover.
 
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue.svg?logo=python&logoColor=white)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115-009688.svg?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)

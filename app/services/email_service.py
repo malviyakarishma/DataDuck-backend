@@ -40,11 +40,11 @@ async def send_otp_email(to_email: str, otp_code: str) -> bool:
             msg["From"] = getattr(settings, "EMAILS_FROM", smtp_user)
             msg["To"] = to_email
 
-            text_content = f"Your verification code for DataDuck (Ask. Dig. Discover.) is: {otp_code}\nThis code will expire in 10 minutes."
+            text_content = f"Your verification code for DataDuck (Doubt. Dig. Discover.) is: {otp_code}\nThis code will expire in 10 minutes."
             html_content = f"""
             <div style="font-family: 'Helvetica Neue', Arial, sans-serif; max-width: 500px; margin: 0 auto; padding: 30px; background-color: #0d0d0d; color: #ffffff; border-radius: 12px; border: 1px solid rgba(255,255,255,0.1);">
                 <h2 style="color: #ffffff; text-align: center; margin-bottom: 4px;">DataDuck</h2>
-                <p style="color: #6b7280; text-align: center; font-size: 11px; text-transform: uppercase; letter-spacing: 2px; margin-bottom: 20px;">Ask. Dig. Discover.</p>
+                <p style="color: #6b7280; text-align: center; font-size: 11px; text-transform: uppercase; letter-spacing: 2px; margin-bottom: 20px;">Doubt. Dig. Discover.</p>
                 <h3 style="color: #ffffff; text-align: center; margin-bottom: 8px;">Verify Your Account</h3>
                 <p style="color: #9ca3af; text-align: center; font-size: 14px; margin-bottom: 24px;">Enter the following 6-digit code to complete registration on DataDuck.</p>
                 <div style="background: rgba(255,255,255,0.05); border: 1px dashed rgba(255,255,255,0.2); border-radius: 8px; padding: 20px; text-align: center; margin-bottom: 24px;">

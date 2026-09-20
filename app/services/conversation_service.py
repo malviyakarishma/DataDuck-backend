@@ -182,9 +182,9 @@ async def delete_all_conversations(
     database_id: Optional[str] = None,
 ) -> int:
     """Delete all conversations for a user (optionally filtered by database)."""
-    query = select(Conversation).where(Conversation.user_id == user_id)
+    query = select(Conversation).where(Conversation.owner_id == user_id)
     if database_id:
-        query = query.where(Conversation.database_id == database_id)
+        query = query.where(Conversation.database_connection_id == database_id)
     
     result = await db.execute(query)
     convs = result.scalars().all()
