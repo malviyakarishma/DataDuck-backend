@@ -21,7 +21,7 @@ import logging
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
-IS_DEV = settings.ENVIRONMENT == "development"
+IS_DEV = settings.ENVIRONMENT == "development" and "vercel.app" not in settings.FRONTEND_URL
 
 
 def set_auth_cookies(response: Response, access_token: str, refresh_token: str):

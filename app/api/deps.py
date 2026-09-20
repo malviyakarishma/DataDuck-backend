@@ -12,9 +12,8 @@ from app.security.auth import decode_token, create_access_token
 from app.services.auth_service import get_current_user
 from app.core.exceptions import AuthenticationError
 from app.core.config import settings
-
 security = HTTPBearer(auto_error=False)
-IS_DEV = settings.ENVIRONMENT == "development"
+IS_DEV = settings.ENVIRONMENT == "development" and "vercel.app" not in settings.FRONTEND_URL
 
 
 def _set_access_cookie(response: Response, access_token: str):
