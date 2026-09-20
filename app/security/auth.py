@@ -1,10 +1,18 @@
 from datetime import datetime, timedelta, timezone
 from typing import Optional
+import uuid
+import bcrypt
+
+# Fix for passlib compatibility with bcrypt >= 4.1.0
+if not hasattr(bcrypt, "__about__"):
+    class _About:
+        __version__ = getattr(bcrypt, "__version__", "4.0.1")
+    bcrypt.__about__ = _About()
+
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 from app.core.config import settings
 from app.core.exceptions import AuthenticationError
-import uuid
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 

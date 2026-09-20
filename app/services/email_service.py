@@ -78,17 +78,19 @@ async def send_otp_email(to_email: str, otp_code: str, purpose: str = "verificat
 
             port = int(smtp_port) if smtp_port else 587
 
+            envelope_from = sender_email.strip()
+
             if port == 465:
                 # Direct SSL (Port 465) - often more reliable on cloud/firewalled networks
                 with smtplib.SMTP_SSL(smtp_host, port, timeout=10) as server:
                     server.login(clean_user, clean_password)
-                    server.sendmail(msg["From"], [to_email], msg.as_string())
+                    server.sendmail(envelope_from, [to_email], msg.as_string())
             else:
                 # STARTTLS (Port 587)
                 with smtplib.SMTP(smtp_host, port, timeout=10) as server:
                     server.starttls()
                     server.login(clean_user, clean_password)
-                    server.sendmail(msg["From"], [to_email], msg.as_string())
+                    server.sendmail(envelope_from, [to_email], msg.as_string())
             
             logger.info(f"Successfully sent {purpose} email via SMTP to {to_email}")
             return True
