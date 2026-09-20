@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     DATABASE_URL: str = "postgresql+asyncpg://postgres:password@localhost:5432/querymind"
 
     # AI Provider
-    AI_PROVIDER: str = "ollama"  # "ollama", "gemini", "openai", or "groq"
+    AI_PROVIDER: str = "ollama"  # "ollama", "gemini", or "openai"
 
     # Ollama Local AI
     OLLAMA_BASE_URL: str = "http://localhost:11434"
@@ -29,9 +29,7 @@ class Settings(BaseSettings):
     OPENAI_MODEL: str = "gpt-4o-mini"
     OPENAI_BASE_URL: str = ""
 
-    # Groq AI
-    GROQ_API_KEY: str = ""
-    GROQ_MODEL: str = "llama-3.1-70b-versatile"
+
 
     # Security
     SECRET_KEY: str = "change-this-secret-key-in-production"

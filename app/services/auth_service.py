@@ -172,3 +172,98 @@ async def refresh_access_token(db: AsyncSession, refresh_token: str) -> str:
 
     user = await get_current_user(db, user_id)
     return create_access_token(str(user.id), user.email)
+
+
+async def forgot_password(db: AsyncSession, email: str) -> bool:
+    """
+    Trigger password reset flow:
+    Generates OTP code, sets expiration, and emails the reset code to the user.
+    """
+    email_clean = email.lower().strip()
+    result = await db.execute(select(User).where(User.email == email_clean))
+    user = result.scalar_one_or_none()
+
+    if not user:
+        raise AuthenticationError("No account found with this email address.")
+
+    if not user.is_active:
+        raise AuthenticationError("This account is deactivated. Please contact support.")
+
+    otp_code = generate_otp_code()
+    user.otp_code = otp_code
+    user.otp_expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
+    await db.flush()
+
+    await send_otp_email(user.email, otp_code, purpose="password_reset")
+    logger.info(f"Password reset OTP sent to: {user.email}")
+    return True
+
+
+async def verify_reset_otp(db: AsyncSession, email: str, otp_code: str) -> bool:
+    """
+    Verify that the password reset OTP code is valid and not expired.
+    """
+    email_clean = email.lower().strip()
+    result = await db.execute(select(User).where(User.email == email_clean))
+    user = result.scalar_one_or_none()
+
+    if not user:
+        raise AuthenticationError("User not found.")
+
+    if not user.otp_code or not user.otp_expires_at:
+        raise AuthenticationError("No reset code found. Please request a new code.")
+
+    now = datetime.now(timezone.utc)
+    expires_at = user.otp_expires_at
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+
+    if now > expires_at:
+        raise AuthenticationError("Reset code has expired. Please request a new code.")
+
+    if user.otp_code.strip() != otp_code.strip():
+        raise AuthenticationError("Invalid reset code. Please check your code and try again.")
+
+    return True
+
+
+async def reset_password(db: AsyncSession, email: str, otp_code: str, new_password: str) -> tuple[User, str, str]:
+    """
+    Verify OTP code and update user's password.
+    Returns (user, access_token, refresh_token).
+    """
+    email_clean = email.lower().strip()
+    result = await db.execute(select(User).where(User.email == email_clean))
+    user = result.scalar_one_or_none()
+
+    if not user:
+        raise AuthenticationError("User not found.")
+
+    if not user.otp_code or not user.otp_expires_at:
+        raise AuthenticationError("No password reset code found. Please request a new one.")
+
+    now = datetime.now(timezone.utc)
+    expires_at = user.otp_expires_at
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+
+    if now > expires_at:
+        raise AuthenticationError("Reset code has expired. Please request a new code.")
+
+    if user.otp_code.strip() != otp_code.strip():
+        raise AuthenticationError("Invalid reset code. Please check the 6-digit code and try again.")
+
+    # Update password, mark as verified, clear OTP
+    user.hashed_password = hash_password(new_password)
+    user.is_verified = True
+    user.otp_code = None
+    user.otp_expires_at = None
+    user.last_login_at = now
+    await db.flush()
+
+    access_token = create_access_token(str(user.id), user.email)
+    refresh_token = create_refresh_token(str(user.id))
+    logger.info(f"Password reset successfully for user: {user.email}")
+
+    return user, access_token, refresh_token
+

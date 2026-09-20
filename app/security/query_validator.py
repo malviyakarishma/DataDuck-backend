@@ -42,9 +42,6 @@ DANGEROUS_SQL_PATTERNS = [
     r"\bPG_WRITE_FILE\b",
     r"\bDBMS_\w+\b",       # Oracle DBMS packages
     r"\bSYS\.\w+\b",       # Oracle SYS objects
-    r"\bINFORMATION_SCHEMA\s*\.\s*COLUMNS\b",  # OK but watch for injection
-    r"0x[0-9a-fA-F]+",     # Hex encoding (obfuscation)
-    r"CHAR\s*\(\s*\d+",    # CHAR() obfuscation
     r"SLEEP\s*\(",         # Time-based blind injection
     r"BENCHMARK\s*\(",     # MySQL timing attack
     r"WAITFOR\s+DELAY",    # SQL Server timing attack
@@ -78,19 +75,20 @@ DIALECT_MAP = {
 
 def validate_sql_query(query: str, db_type: str = "postgresql") -> str:
     """
-    Validate that a SQL query is read-only.
+    Validate that a SQL query is read-only across all supported database types.
 
-    1. Check for multiple statements.
-    2. Check for dangerous patterns.
-    3. Parse with SQLGlot and verify only SELECT / WITH...SELECT.
-    4. Walk AST to find any write operations.
-
-    Returns cleaned query string or raises QueryValidationError / WriteOperationError.
+    1. Strip trailing semicolons and check for multiple statements.
+    2. Check for dangerous patterns (file writes, time-based attacks).
+    3. Keyword-level check for primary write statements.
+    4. AST-level validation (supports SELECT, UNION, INTERSECT, EXCEPT, CTEs, subqueries).
+    5. Fallback validation if AST parser encounters dialect quirks.
     """
     if not query or not query.strip():
         raise QueryValidationError("Empty query.")
 
-    cleaned = query.strip().rstrip(";")
+    cleaned = query.strip()
+    while cleaned.endswith(";"):
+        cleaned = cleaned[:-1].strip()
 
     # 1. Multiple statements check
     if _has_multiple_statements(cleaned):
@@ -106,7 +104,7 @@ def validate_sql_query(query: str, db_type: str = "postgresql") -> str:
     if SQLGLOT_AVAILABLE:
         _validate_ast(cleaned, db_type)
     else:
-        logger.warning("SQLGlot not available — falling back to keyword validation only.")
+        logger.warning("SQLGlot not available — falling back to keyword validation.")
         _keyword_fallback_validation(cleaned)
 
     return cleaned
@@ -126,70 +124,109 @@ def _check_dangerous_patterns(query: str) -> None:
     for pattern in DANGEROUS_SQL_PATTERNS:
         if re.search(pattern, query_upper, re.IGNORECASE | re.DOTALL):
             raise QueryValidationError(
-                f"Query contains a dangerous pattern and was blocked for security."
+                "Query contains a dangerous pattern and was blocked for security."
             )
 
 
 def _check_blocked_keywords(query: str) -> None:
     """Fast keyword check before expensive AST parsing using word boundaries."""
-    query_upper = query.upper()
-    first_word = query_upper.strip().split()[0] if query_upper.strip() else ""
+    query_upper = query.upper().strip()
+    first_word = query_upper.split()[0] if query_upper else ""
 
     # Immediate block if the primary command keyword is a write command
     if first_word in BLOCKED_SQL_STATEMENTS:
         raise WriteOperationError()
-
-    for keyword in BLOCKED_SQL_STATEMENTS:
-        if re.search(r"\b" + re.escape(keyword) + r"\b", query_upper):
-            # Block any standalone write keyword in statement
-            raise WriteOperationError()
 
 
 def _validate_ast(query: str, db_type: str) -> None:
     """Use SQLGlot to parse and validate the query AST."""
     dialect = DIALECT_MAP.get(db_type, "")
 
-    try:
-        parsed = sqlglot.parse(query, dialect=dialect, error_level=sqlglot.ErrorLevel.RAISE)
-    except Exception as e:
-        raise QueryValidationError(f"Query could not be parsed: {e}")
+    parsed = None
+    if dialect:
+        try:
+            parsed = sqlglot.parse(query, dialect=dialect, error_level=sqlglot.ErrorLevel.IGNORE)
+        except Exception:
+            pass
 
     if not parsed:
-        raise QueryValidationError("Empty or unparseable query.")
+        try:
+            parsed = sqlglot.parse(query, error_level=sqlglot.ErrorLevel.IGNORE)
+        except Exception:
+            pass
 
-    if len(parsed) > 1:
+    if not parsed:
+        # If SQLGlot cannot parse dialect-specific syntax, use keyword fallback
+        _keyword_fallback_validation(query)
+        return
+
+    non_empty = [s for s in parsed if s is not None]
+    if not non_empty:
+        _keyword_fallback_validation(query)
+        return
+
+    if len(non_empty) > 1:
         raise QueryValidationError("Multiple SQL statements are not allowed.")
 
-    statement = parsed[0]
+    statement = non_empty[0]
+    unwrapped = statement.unwrap() if hasattr(statement, "unwrap") else statement
 
-    # Must be a SELECT statement (or WITH...SELECT CTE)
-    allowed_types = (exp.Select,)
-    is_cte_select = (
-        isinstance(statement, exp.With) and
-        isinstance(statement.this, exp.Select)
+    # Allowed read query AST types in SQLGlot:
+    # exp.Select, exp.Union, exp.Intersect, exp.Except, or exp.Query base class
+    # or exp.With where query expression is contained
+    allowed_query_types = (exp.Select, exp.Union, exp.Intersect, exp.Except, exp.Query, exp.Subquery)
+    is_valid_query = (
+        isinstance(unwrapped, allowed_query_types)
+        or (isinstance(unwrapped, exp.With) and isinstance(getattr(unwrapped, "this", None), allowed_query_types))
     )
 
-    if not isinstance(statement, allowed_types) and not is_cte_select:
-        statement_type = type(statement).__name__
-        raise WriteOperationError()
+    read_command_classes = tuple(c for c in (getattr(exp, "Describe", None), getattr(exp, "Pragma", None)) if c is not None)
+    is_read_command = (read_command_classes and isinstance(unwrapped, read_command_classes)) or (
+        type(unwrapped).__name__ in ("Describe", "Pragma", "Explain", "Show")
+    )
 
-    # Walk the AST for any write expressions
+    if not is_valid_query and not is_read_command:
+        first_word = query.upper().strip().split()[0] if query.upper().strip() else ""
+        if first_word in ("SELECT", "WITH", "(SELECT", "SHOW", "DESCRIBE", "EXPLAIN", "PRAGMA"):
+            is_valid_query = True
+        else:
+            raise WriteOperationError()
+
+    # Walk AST for write expressions (Insert, Update, Delete, Drop, Alter, Truncate, Create, etc.)
+    blocked_node_types = {
+        "Insert", "Update", "Delete", "Drop", "Create", "Alter",
+        "TruncateTable", "Truncate", "Grant", "Revoke", "Merge",
+    }
     for node in statement.walk():
         node_type = type(node).__name__
-        if node_type in {
-            "Insert", "Update", "Delete", "Drop", "Create", "Alter",
-            "Truncate", "Grant", "Revoke", "Merge", "Command",
-        }:
+        if node_type in blocked_node_types:
             raise WriteOperationError()
 
 
 def _keyword_fallback_validation(query: str) -> None:
-    """Fallback when SQLGlot is not available."""
-    query_upper = query.upper().strip()
-    first_word = query_upper.split()[0] if query_upper.split() else ""
+    """Fallback when SQLGlot cannot parse or is unavailable."""
+    q_no_comments = re.sub(r"--.*$", "", query, flags=re.MULTILINE)
+    q_no_comments = re.sub(r"/\*.*?\*/", "", q_no_comments, flags=re.DOTALL).strip()
 
-    if first_word not in ("SELECT", "WITH"):
+    first_word = q_no_comments.upper().split()[0] if q_no_comments else ""
+    if first_word not in ("SELECT", "WITH", "(SELECT", "SHOW", "DESCRIBE", "EXPLAIN", "PRAGMA"):
         raise WriteOperationError()
+
+    q_no_strings = re.sub(r"'[^']*'", "''", q_no_comments)
+    q_no_strings = re.sub(r'"[^"]*"', '""', q_no_strings)
+
+    write_patterns = [
+        r"\bDELETE\s+FROM\b",
+        r"\bINSERT\s+INTO\b",
+        r"\bUPDATE\s+[\w.\"]+\s+SET\b",
+        r"\bDROP\s+(?:TABLE|VIEW|DATABASE|INDEX|SCHEMA)\b",
+        r"\bALTER\s+(?:TABLE|VIEW|DATABASE|INDEX|SCHEMA)\b",
+        r"\bTRUNCATE\s+(?:TABLE\s+)?[\w.\"]+\b",
+        r"\bCREATE\s+(?:TABLE|VIEW|DATABASE|INDEX|SCHEMA)\b",
+    ]
+    for pattern in write_patterns:
+        if re.search(pattern, q_no_strings, re.IGNORECASE):
+            raise WriteOperationError()
 
 
 def validate_mongodb_operation(operation: dict) -> dict:
@@ -236,18 +273,37 @@ def validate_mongodb_operation(operation: dict) -> dict:
 
 def is_write_intent(user_message: str) -> bool:
     """
-    Quick check if the user's natural language message has write intent.
-    Used to give early refusal before even calling Gemini.
+    Quick check if the user's natural language message has EXPLICIT write intent.
+    Only matches clear imperative SQL-style commands, NOT analytical words.
+
+    Examples that SHOULD match:
+    - "delete all inactive users"  -> True (imperative "delete" + target)
+    - "drop the users table"       -> True (imperative "drop" + "table")
+    - "insert a new row into orders" -> True
+
+    Examples that should NOT match:
+    - "what caused the drop in sales?"      -> False (analytical use of "drop")
+    - "show me the change in price"         -> False (analytical use of "change")
+    - "which column has null values"        -> False
+    - "clear picture of customer spending"  -> False
     """
     write_patterns = [
-        r"\b(delete\s+from|update\s+\w+\s+set|insert\s+into|drop\s+table|alter\s+table|truncate\s+table|create\s+table)\b",
-        r"\b(delete|remove|drop|truncate|wipe|clear|erase)\b",
-        r"\b(update|modify|change|edit|alter|set)\b.*\b(record|row|data|value|field|table|database|price|name|status|column)\b",
-        r"\b(insert|add|create|append|put)\b.*\b(record|row|data|entry|user|order|customer|into|values)\b",
-        r"\b(update|set)\b.*\bwhere\b",
+        # Explicit SQL command patterns (very specific, low false-positive)
+        r"\b(delete\s+from|delete\s+all|delete\s+(the\s+)?record|delete\s+(the\s+)?row|delete\s+(the\s+)?user|delete\s+(the\s+)?data)\b",
+        r"\b(insert\s+into|insert\s+(a\s+)?(new\s+)?record|insert\s+(a\s+)?(new\s+)?row)\b",
+        r"\b(update\s+\w+\s+set|update\s+(the\s+)?(record|row|data|value|status|price|name|field))\b",
+        r"\b(drop\s+(the\s+)?(table|database|collection|index))\b",
+        r"\b(alter\s+(the\s+)?(table|column|database))\b",
+        r"\b(truncate\s+(the\s+)?(table|collection))\b",
+        r"\b(create\s+(a\s+)?(new\s+)?(table|database|collection|index))\b",
+        # Imperative write verbs at the START of the sentence (command-style)
+        r"^(delete|remove|drop|truncate|wipe|erase|destroy)\s+",
+        r"^(insert|add)\s+(a\s+|new\s+)?(record|row|entry|data|user|order|customer)\b",
+        r"^(update|modify|edit|change)\s+(the\s+)?(record|row|data|value|field|status|price|name)\b",
     ]
-    message_lower = user_message.lower()
+    message_lower = user_message.strip().lower()
     for pattern in write_patterns:
-        if re.search(pattern, message_lower, re.IGNORECASE):
+        if re.search(pattern, message_lower):
             return True
     return False
+

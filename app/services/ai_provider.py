@@ -39,14 +39,6 @@ def deterministic_classify_intent(user_question: str) -> str:
     if is_write_intent(user_question):
         return INTENT_WRITE_REQUEST
 
-    write_direct_patterns = [
-        r"\b(insert\s+into|update\s+\w+\s+set|delete\s+from|drop\s+table|alter\s+table|truncate\s+table|create\s+table)\b",
-        r"\b(insert|update|delete|drop|truncate|alter|create\s+table|modify\s+data)\b",
-    ]
-    for pattern in write_direct_patterns:
-        if re.search(pattern, q):
-            return INTENT_WRITE_REQUEST
-
     # 2. CASUAL_CHAT patterns
     casual_patterns = [
         r"^(hi|hello|hey|howdy|hola|yo|sup|greetings)[!.,? ]*$",
@@ -65,7 +57,8 @@ def deterministic_classify_intent(user_question: str) -> str:
         r"\b(database\s+diagram|schema\s+diagram|table\s+diagram)\b",
         r"\b(show|describe|explain|view|get|list|display)\b.*\b(schema|database\s+structure|architecture)\b",
         r"\b(database\s+schema|schema|data\s+dictionary)\b",
-        r"\b(show\s+tables|list\s+tables|what\s+tables|tables\s+in\s+(the\s+)?database|all\s+tables|all\s+collections)\b",
+        r"\b(show|list|what|which|tell|give|get|display)\b.*\b(tables?|collections?|table\s+names?|collection\s+names?)\b",
+        r"\b(all\s+tables?|all\s+collections?|tables?\s+in|collections?\s+in)\b",
         r"\b(how\s+many\s+(tables?|collections?|entities?|models?))\b",
         r"\b(total\s+(number\s+of\s+)?(tables?|collections?))\b",
         r"\b(count\s+of\s+(tables?|collections?)|(table|collection)\s+count)\b",
@@ -77,6 +70,8 @@ def deterministic_classify_intent(user_question: str) -> str:
         r"\b(explain\s+the\s+\w+\s+(table|collection)|describe\s+the\s+\w+\s+(table|collection))\b",
         r"\b(what\s+(tables?|collections?)\s+(are\s+in|exist\s+in|does\s+this\s+(app|db|database)\s+have))\b",
         r"\b(what\s+tables\s+are\s+in\s+my\s+database|what\s+tables\s+exist)\b",
+        r"\b(table\s+names?|collection\s+names?|names\s+of\s+(all\s+)?(the\s+)?(tables?|collections?))\b",
+        r"\bwhat\s+(does|do)\s+this\s+(db|database)\s+(contain|have)\b",
     ]
     for pattern in schema_patterns:
         if re.search(pattern, q):
@@ -253,7 +248,7 @@ def get_ai_service() -> AIProvider:
     if provider == "ollama":
         from app.services.ollama_service import OllamaService
         return OllamaService()
-    if provider in ("openai", "groq") or (settings.GROQ_API_KEY and provider == "groq"):
+    if provider in ("openai",):
         from app.services.openai_service import OpenAIService
         return OpenAIService()
     from app.services.gemini_service import GeminiService

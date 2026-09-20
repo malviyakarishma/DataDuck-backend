@@ -4,11 +4,12 @@ from typing import Optional
 from app.core.database import get_db
 from app.schemas.auth import (
     RegisterRequest, LoginRequest, TokenResponse, RefreshRequest, UserResponse,
-    VerifyOTPRequest, ResendOTPRequest, OTPResponse, LoginResponse
+    VerifyOTPRequest, ResendOTPRequest, OTPResponse, LoginResponse,
+    ForgotPasswordRequest, ResetPasswordRequest
 )
 from app.services.auth_service import (
     register_user, authenticate_user, refresh_access_token, get_current_user,
-    verify_otp, resend_otp
+    verify_otp, resend_otp, forgot_password, reset_password, verify_reset_otp
 )
 from app.security.auth import create_refresh_token, decode_token
 from app.api.deps import get_current_user_dep
@@ -189,3 +190,61 @@ async def get_me(current_user: User = Depends(get_current_user_dep)):
         is_active=current_user.is_active,
         created_at=current_user.created_at.isoformat(),
     )
+
+
+@router.post("/forgot-password")
+async def forgot_password_route(
+    request: ForgotPasswordRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """Send 6-digit OTP code to user email for password reset."""
+    try:
+        await forgot_password(db, request.email)
+        return {
+            "message": "A 6-digit password reset code has been sent to your email.",
+            "email": request.email,
+            "requires_otp": True,
+        }
+    except AuthenticationError as e:
+        raise HTTPException(status_code=400, detail=e.message)
+
+
+@router.post("/verify-reset-otp")
+async def verify_reset_otp_route(
+    request: VerifyOTPRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """Verify that password reset OTP code is valid before proceeding to set new password."""
+    try:
+        await verify_reset_otp(db, request.email, request.otp_code)
+        return {
+            "valid": True,
+            "message": "Code verified successfully.",
+            "email": request.email,
+        }
+    except AuthenticationError as e:
+        raise HTTPException(status_code=400, detail=e.message)
+
+
+@router.post("/reset-password", response_model=TokenResponse)
+async def reset_password_route(
+    request: ResetPasswordRequest,
+    response: Response,
+    db: AsyncSession = Depends(get_db),
+):
+    """Verify reset OTP and set new password. Logs the user in."""
+    try:
+        user, access_token, refresh_token = await reset_password(
+            db, request.email, request.otp_code, request.new_password
+        )
+        set_auth_cookies(response, access_token, refresh_token)
+        return TokenResponse(
+            access_token=access_token,
+            refresh_token=refresh_token,
+            user_id=str(user.id),
+            email=user.email,
+            full_name=user.full_name,
+        )
+    except AuthenticationError as e:
+        raise HTTPException(status_code=400, detail=e.message)
+

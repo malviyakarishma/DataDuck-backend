@@ -249,7 +249,7 @@ async def run_query_pipeline(
     logger.info(f"⏱️ [STAGE 1: Intent Classification] Took {t_intent_ms:.1f}ms | Result: '{intent}'")
 
     # ── Intent 1: WRITE_REQUEST ───────────────────────────────────────────
-    if intent == INTENT_WRITE_REQUEST or is_write_intent(user_question):
+    if intent == INTENT_WRITE_REQUEST:
         t_stage_start = time.perf_counter()
         refusal = await ai_service.handle_write_intent(user_question)
         t_refusal_ms = (time.perf_counter() - t_stage_start) * 1000.0
@@ -355,6 +355,51 @@ async def run_query_pipeline(
                 intent=INTENT_SCHEMA_EXPLORATION,
             )
 
+        # Check if list of tables/collections is requested
+        is_table_list_request = bool(
+            re.search(r"\b(show|list|tell|what|which|get|display|all)\b.*\b(tables?|collections?|entities?|models?)\b", q_lower) or
+            re.search(r"\b(table\s+names?|collection\s+names?|names\s+of\s+(all\s+)?(the\s+)?(tables?|collections?))\b", q_lower) or
+            re.search(r"\bwhat\s+(does|do)\s+this\s+(database|db)\s+(have|contain)\b", q_lower)
+        )
+
+        if is_table_list_request:
+            tables = full_schema.get("tables", [])
+            term = "collection" if db_type == "mongodb" else "table"
+            terms = "collections" if db_type == "mongodb" else "tables"
+            
+            lines = [f"This database contains **{len(tables)} {terms}**:\n"]
+            for i, tbl in enumerate(tables, 1):
+                col_names = [c.get("name", "") for c in tbl.get("columns", [])[:6] if c.get("name")]
+                col_summary = ", ".join(col_names)
+                if len(tbl.get("columns", [])) > 6:
+                    col_summary += f", +{len(tbl.get('columns', [])) - 6} more"
+                
+                row_str = f" (~{tbl.get('row_count', 0):,} records)" if tbl.get('row_count') is not None else ""
+                lines.append(f"{i}. **`{tbl.get('name')}`**{row_str}")
+                if col_summary:
+                    lines.append(f"   - Fields: _{col_summary}_\n")
+                else:
+                    lines.append("")
+
+            lines.append(f"\nYou can ask specific questions about any of these {terms} or click **Schema Explorer** to view ER relationships.")
+            
+            answer = "\n".join(lines)
+            insights = [
+                f"Database has {len(tables)} {terms} indexed.",
+                f"Available {terms}: {', '.join(t.get('name', '') for t in tables[:8])}"
+            ]
+            return QueryPipelineResult(
+                answer=answer,
+                insights=insights,
+                warnings=[],
+                data_quality_notes=[],
+                query=None,
+                query_language=None,
+                result=None,
+                visualization=None,
+                intent=INTENT_SCHEMA_EXPLORATION,
+            )
+
         # Schema question answering (e.g. explain table, show columns, relationships)
         t_stage_start = time.perf_counter()
         schema_analysis = await ai_service.answer_schema_question(
@@ -444,10 +489,35 @@ async def run_query_pipeline(
                 query_dict = generated_query
             query_dict = validate_mongodb_operation(query_dict)
             validated_query = query_dict
-        except (json.JSONDecodeError, QueryValidationError, WriteOperationError) as e:
-            raise QueryValidationError(f"Invalid MongoDB operation: {e}")
+        except Exception as e:
+            logger.warning(f"MongoDB validation notice: {e}")
+            return QueryPipelineResult(
+                answer=f"I couldn't find the requested collection or construct a valid MongoDB query for this question ({e}). Please verify the collection names in your database schema.",
+                insights=[],
+                warnings=["The requested collection or fields could not be resolved from your connected database."],
+                data_quality_notes=[],
+                query=str(generated_query) if generated_query else None,
+                query_language="mongodb",
+                result=None,
+                visualization=None,
+                intent=INTENT_DATA_QUERY,
+            )
     else:
-        validated_query = validate_sql_query(generated_query, db_type)
+        try:
+            validated_query = validate_sql_query(generated_query, db_type)
+        except Exception as e:
+            logger.warning(f"SQL validation notice: {e}")
+            return QueryPipelineResult(
+                answer=f"I couldn't validate a safe SQL query for this question: {e}. Please check if the requested tables and columns exist in your database schema.",
+                insights=[],
+                warnings=["The query referenced entities that could not be validated against your database schema."],
+                data_quality_notes=[],
+                query=str(generated_query) if generated_query else None,
+                query_language="sql",
+                result=None,
+                visualization=None,
+                intent=INTENT_DATA_QUERY,
+            )
 
     t_validation_ms = (time.perf_counter() - t_stage_start) * 1000.0
     logger.info(f"⏱️ [STAGE 4: Security AST Validation] Took {t_validation_ms:.1f}ms | Passed read-only verification")
@@ -465,6 +535,19 @@ async def run_query_pipeline(
         query_result = await adapter.execute_read_query(
             validated_query,
             timeout=settings.QUERY_TIMEOUT_SECONDS
+        )
+    except Exception as e:
+        logger.warning(f"Database query execution error: {e}")
+        return QueryPipelineResult(
+            answer=f"The database encountered an error while executing the query: {e}. This typically indicates that a table, collection, or column in the question does not exist in this database.",
+            insights=[],
+            warnings=["Query failed to execute against the database engine."],
+            data_quality_notes=[],
+            query=str(generated_query) if generated_query else None,
+            query_language=query_language,
+            result=None,
+            visualization=None,
+            intent=INTENT_DATA_QUERY,
         )
     finally:
         await adapter.close()

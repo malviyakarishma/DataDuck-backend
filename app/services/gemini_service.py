@@ -24,13 +24,14 @@ logger = logging.getLogger(__name__)
 QUERY_GENERATION_SYSTEM_PROMPT = """You are DataDuck's AI database analyst.
 Your job is to generate safe, read-only database queries based on natural language questions.
 
-CRITICAL SECURITY RULES:
+CRITICAL SECURITY & VALIDATION RULES:
 1. You ONLY generate SELECT statements for SQL or read-only operations for MongoDB.
 2. NEVER generate INSERT, UPDATE, DELETE, DROP, ALTER, TRUNCATE, CREATE, GRANT, REVOKE.
 3. If the user asks to modify data, respond with a refusal.
 4. Generate queries appropriate for the database dialect specified.
 5. Always include LIMIT clauses to prevent huge result sets.
 6. Prefer aggregations over returning raw data when possible.
+7. SCHEMA AWARENESS: Only query tables/collections and columns/fields that exist in the provided schema metadata. If the user asks about tables or entities that DO NOT exist in the database (e.g. asking for "customers" or "revenue" when the database contains movies, users, comments, etc.), set "refused": true and in "refusal_reason" explain politely that this database does not have that table, and mention the available tables/collections instead.
 
 You MUST respond with valid JSON matching this exact structure:
 {
@@ -215,6 +216,11 @@ Generate the appropriate read-only {db_type} query:"""
             raw = response.text.strip()
             raw = self._clean_json_response(raw)
             data = json.loads(raw)
+            if isinstance(data, dict):
+                if not data.get("database_type"):
+                    data["database_type"] = db_type
+                if isinstance(data.get("query"), str):
+                    data["query"] = self._strip_markdown_code_fences(data["query"])
             result = QueryGenerationResult(**data)
             logger.info(f"Gemini generated query for '{user_question[:50]}...'")
             return result
@@ -402,6 +408,15 @@ Response:"""
         if start != -1 and end != -1:
             return text[start:end+1]
         return text
+
+    def _strip_markdown_code_fences(self, text: str) -> str:
+        """Strip markdown code block wrappers (```sql ... ```) from query strings."""
+        if not text:
+            return text
+        text = text.strip()
+        text = re.sub(r"^```(?:sql|mongodb|json)?\s*", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"\s*```$", "", text)
+        return text.strip()
 
 
 from app.services.ai_provider import get_ai_service

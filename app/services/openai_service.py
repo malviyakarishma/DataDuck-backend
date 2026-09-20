@@ -29,20 +29,12 @@ class OpenAIService(AIProvider):
     """OpenAI implementation of the AI provider."""
 
     def __init__(self):
-        provider = (settings.AI_PROVIDER or "").lower()
-        if provider == "groq" or settings.GROQ_API_KEY:
-            self.api_key = settings.GROQ_API_KEY or settings.OPENAI_API_KEY
-            if not self.api_key:
-                raise AIServiceError("GROQ_API_KEY is not configured.")
-            self.model = settings.GROQ_MODEL or "llama-3.1-70b-versatile"
-            self.api_url = "https://api.groq.com/openai/v1/chat/completions"
-        else:
-            self.api_key = settings.OPENAI_API_KEY
-            if not self.api_key:
-                raise AIServiceError("OPENAI_API_KEY is not configured.")
-            self.model = settings.OPENAI_MODEL or "gpt-4o-mini"
-            base_url = (settings.OPENAI_BASE_URL or "https://api.openai.com/v1").rstrip("/")
-            self.api_url = f"{base_url}/chat/completions" if not base_url.endswith("/chat/completions") else base_url
+        self.api_key = settings.OPENAI_API_KEY
+        if not self.api_key:
+            raise AIServiceError("OPENAI_API_KEY is not configured.")
+        self.model = settings.OPENAI_MODEL or "gpt-4o-mini"
+        base_url = (settings.OPENAI_BASE_URL or "https://api.openai.com/v1").rstrip("/")
+        self.api_url = f"{base_url}/chat/completions" if not base_url.endswith("/chat/completions") else base_url
 
     async def _call_openai(self, system_prompt: str, user_prompt: str) -> dict:
         headers = {
@@ -103,6 +95,15 @@ Generate the appropriate read-only {db_type} query:"""
 
         try:
             parsed_data = await self._call_openai(QUERY_GENERATION_SYSTEM_PROMPT, prompt)
+
+            # Ensure database_type is set (some models omit it)
+            if isinstance(parsed_data, dict) and not parsed_data.get("database_type"):
+                parsed_data["database_type"] = db_type
+
+            # Strip markdown code fences from query field if present
+            if isinstance(parsed_data.get("query"), str):
+                parsed_data["query"] = self._strip_markdown_code_fences(parsed_data["query"])
+
             result = QueryGenerationResult(**parsed_data)
             logger.info(f"OpenAI generated query for '{user_question[:50]}...'")
             return result
@@ -290,3 +291,11 @@ Response:"""
         if start != -1 and end != -1:
             return text[start:end+1]
         return text
+
+    def _strip_markdown_code_fences(self, text: str) -> str:
+        """Strip markdown code fences that AI models sometimes wrap queries in."""
+        text = re.sub(r"```sql\s*", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"```json\s*", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"```\s*", "", text)
+        return text.strip()
+

@@ -12,7 +12,7 @@
 
 ## 🌟 Key Features
 
-- 🧠 **Multi-AI Provider Support**: Seamlessly switch between local offline LLMs (**Ollama**) and cloud providers (**Google Gemini**, **OpenAI**, **Groq**).
+- 🧠 **Multi-AI Provider Support**: Seamlessly switch between local offline LLMs (**Ollama**) and cloud providers (**Google Gemini**, **OpenAI**).
 - 🗄️ **Multi-Engine Database Connectivity**: Connect and analyze PostgreSQL, MySQL, SQLite, and MongoDB.
 - 🛡️ **Zero-Trust Read-Only AST Engine**: Enforces strict AST-level SQL validation using `SQLGlot`. Hard-blocks `INSERT`, `UPDATE`, `DELETE`, `DROP`, `ALTER`, `TRUNCATE`, and multi-statement execution.
 - 🔐 **Fernet Encryption at Rest**: Encrypts database connection credentials using AES-128-CBC via Fernet symmetric encryption.
@@ -31,7 +31,6 @@
 | **Ollama** *(Local)* | `qwen2.5-coder:7b`, `llama3`, `deepseek-r1` | 100% Offline / Private | 🔒 Local Only (No cloud leakage) |
 | **Google Gemini** | `gemini-2.0-flash`, `gemini-1.5-pro` | High Speed & Deep Reasoning | ☁️ Cloud API |
 | **OpenAI** | `gpt-4o-mini`, `gpt-4o` | Complex SQL Schema Mapping | ☁️ Cloud API |
-| **Groq** | `llama-3.3-70b-versatile`, `mixtral-8x7b-32768` | Ultra Low-Latency Response | ☁️ Cloud API |
 
 ### 🗃️ Supported Databases
 
@@ -61,7 +60,6 @@ flowchart TD
     AIBridge -->|Local AI| Ollama[Ollama Local Service :11434]
     AIBridge -->|Cloud AI| Gemini[Google Gemini API]
     AIBridge -->|Cloud AI| OpenAI[OpenAI API]
-    AIBridge -->|Cloud AI| Groq[Groq API]
     
     ChatSvc --> ASTValidator[SQLGlot AST Safe Parser]
     ASTValidator -->|Passed Read-Only Check| Adapter[Database Adapter Factory]

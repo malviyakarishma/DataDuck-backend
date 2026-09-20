@@ -58,7 +58,7 @@ class MongoDBAdapter(DatabaseAdapter):
 
     async def test_connection(self) -> bool:
         try:
-            if not self._client:
+            if self._client is None:
                 await self.connect()
             await self._client.admin.command("ping")
             return True
@@ -167,7 +167,7 @@ class MongoDBAdapter(DatabaseAdapter):
             "field": str (optional, for distinct)
         }
         """
-        if not self._db:
+        if self._db is None:
             raise QueryExecutionError("Not connected to MongoDB.")
 
         if not isinstance(query, dict):
@@ -268,7 +268,7 @@ class MongoDBAdapter(DatabaseAdapter):
         return result
 
     async def close(self) -> None:
-        if self._client:
+        if self._client is not None:
             self._client.close()
             self._client = None
             logger.info("MongoDB adapter closed.")
