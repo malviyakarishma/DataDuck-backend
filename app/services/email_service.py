@@ -50,7 +50,7 @@ async def send_otp_email(to_email: str, otp_code: str, purpose: str = "verificat
             
             # Format sender with custom app display name: "DataDuck <email@domain.com>"
             sender_email = getattr(settings, "EMAILS_FROM", None) or smtp_user
-            msg["From"] = formataddr(("DataDuck", sender_email))
+            msg["From"] = formataddr(("DataDuck", sender_email.strip()))
             msg["To"] = to_email
 
             text_content = f"Your {subject_title.lower()} for DataDuck (Doubt. Dig. Discover.) is: {otp_code}\nThis code will expire in 10 minutes."
@@ -69,15 +69,31 @@ async def send_otp_email(to_email: str, otp_code: str, purpose: str = "verificat
             msg.attach(MIMEText(text_content, "plain"))
             msg.attach(MIMEText(html_content, "html"))
 
-            with smtplib.SMTP(smtp_host, int(smtp_port)) as server:
-                server.starttls()
-                server.login(smtp_user, smtp_password)
-                server.sendmail(msg["From"], [to_email], msg.as_string())
+            clean_user = smtp_user.strip()
+            # Clean password: strip quotes and spaces if provided with spaces (e.g. Gmail App Password)
+            clean_password = smtp_password.strip().strip("'\"")
+            # If 16 chars with spaces (e.g. "abcd efgh ijkl mnop"), remove spaces
+            if len(clean_password.replace(" ", "")) == 16:
+                clean_password = clean_password.replace(" ", "")
+
+            port = int(smtp_port) if smtp_port else 587
+
+            if port == 465:
+                # Direct SSL (Port 465) - often more reliable on cloud/firewalled networks
+                with smtplib.SMTP_SSL(smtp_host, port, timeout=10) as server:
+                    server.login(clean_user, clean_password)
+                    server.sendmail(msg["From"], [to_email], msg.as_string())
+            else:
+                # STARTTLS (Port 587)
+                with smtplib.SMTP(smtp_host, port, timeout=10) as server:
+                    server.starttls()
+                    server.login(clean_user, clean_password)
+                    server.sendmail(msg["From"], [to_email], msg.as_string())
             
             logger.info(f"Successfully sent {purpose} email via SMTP to {to_email}")
             return True
         except Exception as e:
-            logger.error(f"Failed to send email via SMTP: {e}. (Logged OTP code to console above)")
+            logger.error(f"Failed to send email via SMTP ({type(e).__name__}: {e}). (Logged OTP code to console above)")
             return False
     
     return True
